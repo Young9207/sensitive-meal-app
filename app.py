@@ -4,6 +4,84 @@ import pandas as pd
 import json, re, random, time, os, io, zipfile, math
 from datetime import date, time as dtime, datetime
 
+# === Bilingual Tag & Nutrient Normalization Utilities ===
+def _normalize_token(s: str) -> str:
+    return (
+        s.strip()
+         .replace("-", "")
+         .replace("_", "")
+         .replace(" ", "")
+         .lower()
+    )
+
+# Canonical tags we support (add as needed):
+# "essential", "optional", "all", "core", "extras" etc.
+_TAG_ALIAS = {
+    # essential
+    "essential": "essential",
+    "essentials": "essential",
+    "필수": "essential",
+    "에센셜": "essential",
+    "기본": "essential",
+    "중요": "essential",
+    # optional / extras
+    "optional": "optional",
+    "옵션": "optional",
+    "선택": "optional",
+    "추가": "optional",
+    "부가": "optional",
+    "extras": "optional",
+    "extra": "optional",
+    # all
+    "all": "all",
+    "전체": "all",
+    "모두": "all",
+    # core
+    "core": "core",
+    "코어": "core",
+    "핵심": "core",
+    # missing/sufficient filters (if you tag results)
+    "부족": "insufficient",
+    "insufficient": "insufficient",
+    "충분": "ok",
+    "sufficient": "ok",
+}
+
+def normalize_tag(tag: str) -> str:
+    k = _normalize_token(tag)
+    return _TAG_ALIAS.get(k, tag)  # if unknown, pass-through
+
+# Nutrient alias map (optional but helpful if nutrients appear as tags/keys)
+_NUTR_ALIAS = {
+    # vitamins
+    "a":"VitaminA","비타민a":"VitaminA","비타민에이":"VitaminA","vitamina":"VitaminA",
+    "b":"VitaminB","비타민b":"VitaminB","비타민비":"VitaminB","vitaminb":"VitaminB",
+    "c":"VitaminC","비타민c":"VitaminC","비타민씨":"VitaminC","vitaminc":"VitaminC",
+    "d":"VitaminD","비타민d":"VitaminD","비타민디":"VitaminD","vitamind":"VitaminD",
+    "e":"VitaminE","비타민e":"VitaminE","비타민이":"VitaminE","vitamine":"VitaminE",
+    "k":"VitaminK","비타민k":"VitaminK","비타민케이":"VitaminK","vitamink":"VitaminK",
+    # minerals
+    "fe":"Iron","철":"Iron","철분":"Iron","iron":"Iron",
+    "mg":"Magnesium","마그네슘":"Magnesium","magnesium":"Magnesium",
+    "kpotassium":"Potassium","칼륨":"Potassium","potassium":"Potassium",
+    "ca":"Calcium","칼슘":"Calcium","calcium":"Calcium",
+    "iodine":"Iodine","요오드":"Iodine","아이오딘":"Iodine",
+    # macros/others
+    "protein":"Protein","단백질":"Protein",
+    "lightprotein":"LightProtein","라이트단백질":"LightProtein","경단백질":"LightProtein",
+    "complexcarb":"ComplexCarb","복합탄수화물":"ComplexCarb","복합탄수":"ComplexCarb",
+    "healthyfat":"HealthyFat","건강한지방":"HealthyFat",
+    "fiber":"Fiber","식이섬유":"Fiber",
+    "omega3":"Omega3","오메가3":"Omega3","오메가삼":"Omega3",
+    "hydration":"Hydration","수분":"Hydration","수분보충":"Hydration",
+    "circulation":"Circulation","순환":"Circulation","혈액순환":"Circulation",
+}
+
+def normalize_nutrient_key(key: str) -> str:
+    k = _normalize_token(key)
+    return _NUTR_ALIAS.get(k, key)
+
+
 st.set_page_config(page_title="민감도 식사 로그 • 현실형 제안 (안정화)", page_icon="🥣", layout="wide")
 
 def _force_rerun():
@@ -23,9 +101,11 @@ USER_RULES_PATH = "user_rules.json"
 SLOTS = ["오전","오전 간식","점심","오후","오후 간식","저녁"]
 EVENT_TYPES = ["food","supplement","symptom"]  # 단순화
 
-# CORE_NUTRIENTS now imported from nutrition_assessor
+CORE_NUTRIENTS = ["Protein","LightProtein","ComplexCarb","HealthyFat","Fiber",
+                  "A","B","C","D","E","K","Fe","Mg","Omega3","K_potassium",
+                  "Iodine","Ca","Hydration","Circulation"]
 
-# ESSENTIALS now imported from nutrition_assessor
+ESSENTIALS = ["Protein","ComplexCarb","Fiber","B","C","A","K","Mg","Omega3","K_potassium","HealthyFat","D"]
 
 SUGGEST_MODES = ["기본","달다구리(당김)","역류","더부룩","붓기","피곤함","변비"]
 
@@ -787,10 +867,14 @@ except Exception:
     pass
 
 if 'CORE_NUTRIENTS' not in globals():
-    # CORE_NUTRIENTS now imported from nutrition_assessor
+    CORE_NUTRIENTS = [
+        "단백질", "식이섬유", "철", "칼슘", "마그네슘", "칼륨",
+        "오메가3", "비타민A", "비타민B", "비타민C", "비타민D", "비타민E",
+        "저당", "저염", "건강한지방"
+    ]
 
 if 'ESSENTIALS' not in globals():
-    # ESSENTIALS now imported from nutrition_assessor
+    ESSENTIALS = ["단백질", "식이섬유", "비타민C", "칼슘"]
 
 if 'food_db' not in globals():
     FOOD_ROWS = [
@@ -1258,73 +1342,23 @@ except Exception:
 
 # ==== [END ADDON] =============================================================
 
+# Ensure canonical tag for widget selections (use like: selected = canonicalize_widget_tag(selected))
+def canonicalize_widget_tag(value: str) -> str:
+    try:
+        return normalize_tag(value)
+    except Exception:
+        return value
 
 
-# === Nutrient Deficiency Checker Panel ===
-try:
-    import streamlit as st  # ensure streamlit is available
-    with st.expander("🔎 Nutrient deficiency checker", expanded=False):
-        st.markdown("입력 형식: **영양소명 → 값** JSON (별칭 자동 정규화)")
-        example = {
-            "protein": 55,
-            "complex_carb": true,
-            "fiber": 18,
-            "VitaminC": 60,
-            "k_potassium": 2500,
-            "healthyFat": true,
-            "vitaminD": 10
-        }
-        default_text = st.session_state.get("nutr_json", json.dumps(example, ensure_ascii=False, indent=2))
-        txt = st.text_area("intake JSON", value=default_text, height=220)
-        colA, colB = st.columns(2)
-        essentials_only = colA.toggle("ESSENTIALS만 평가", value=True)
-        use_default_targets = colB.toggle("기본 목표치 사용(DEFAULT_TARGETS)", value=True,
-                                          help="끄면 자체 목표치 JSON을 입력할 수 있어요.")
-        targets = None
-        if not use_default_targets:
-            t_default = {
-                "Protein": 60,
-                "Fiber": 25,
-                "Omega3": 1.1,
-                "Magnesium": 310,
-                "Potassium": 3500,
-                "Calcium": 1000,
-                "Iron": 18,
-                "VitaminC": 75,
-                "VitaminD": 15,
-                "VitaminA": 700,
-                "VitaminE": 15,
-                "VitaminK": 90
-            }
-            t_text = st.text_area("목표치 JSON (nutrient → numeric)", value=json.dumps(t_default, ensure_ascii=False, indent=2), height=220)
-            try:
-                targets = json.loads(t_text)
-            except Exception as e:
-                st.warning(f"목표치 JSON 파싱 실패: {e} — DEFAULT_TARGETS를 사용합니다.")
-                targets = DEFAULT_TARGETS
-        else:
-            targets = DEFAULT_TARGETS
-        run = st.button("평가 실행")
-        if run:
-            try:
-                intake = json.loads(txt)
-                st.session_state["nutr_json"] = txt
-            except Exception as e:
-                st.error(f"입력 JSON 파싱 실패: {e}")
-                intake = {}
-            if intake:
-                from nutrition_assessor import assess_intake, pretty_report
-                res = assess_intake(intake=intake, targets=targets, check_list=ESSENTIALS if essentials_only else CORE_NUTRIENTS)
-                st.code(pretty_report(res), language="text")
-                # Table friendly dict
-                data = [{"nutrient": k, "value": v, "target": t} for (k, v, t) in res.insufficient]
-                if data:
-                    st.subheader("부족(Insufficient) 상세")
-                    st.dataframe(data, use_container_width=True)
-                if res.missing:
-                    st.info("미보고(Missing): " + ", ".join(res.missing))
-                if res.not_recognized:
-                    st.caption("무시된 키: " + ", ".join(res.not_recognized))
-except Exception as _e:
-    # Non-fatal: app continues even if panel fails
-    pass
+# === Apply tag aliases for category lookups ===
+def get_category_items(categories: dict, tag: str):
+    canon = normalize_tag(tag)
+    if canon in categories:
+        return categories[canon]
+    # Try to find by alias key conversion (e.g., user used '필수' key in config)
+    # Build once a mapping from alias keys to canonical if needed.
+    for k in list(categories.keys()):
+        nk = normalize_tag(str(k))
+        if nk != k and nk not in categories:
+            categories[nk] = categories[k]
+    return categories.get(canon, [])
