@@ -780,7 +780,46 @@ with tab4:
 
 
 
-# ==== [ADDON] 즉석 식단 평가 + 영양 한줄 코멘트 ===============================
+# ==== [ADDON] 즉석 식단 평가 + 영양 한줄 코멘트
+
+# --- Nutrient simple explanations (extended) ---
+if 'NUTRIENT_TIPS' not in globals():
+    NUTRIENT_TIPS = {}
+NUTRIENT_TIPS_LONG = {
+    "단백질": "근육 유지, 상처 회복, 포만감 유지에 핵심.",
+    "식이섬유": "배변 규칙성, 포만감, 혈당 급상승 완화에 도움.",
+    "철": "피로감·어지러움 예방(산소 운반). 비타민 C와 함께 섭취하면 흡수↑",
+    "칼슘": "뼈·치아 건강, 신경·근육 기능.",
+    "마그네슘": "근육 이완, 수면·긴장 완화, 에너지 대사.",
+    "칼륨": "나트륨 배출을 도와 붓기·혈압 조절.",
+    "오메가3": "심혈관·뇌 건강, 염증 균형.",
+    "비타민A": "야간 시력·피부·점막 보호.",
+    "비타민B": "에너지 생성·피로 완화(복합군).",
+    "비타민C": "면역, 철 흡수, 항산화.",
+    "비타민D": "칼슘 흡수·뼈 건강, 면역 조절.",
+    "비타민E": "항산화(세포 보호), 피부 컨디션.",
+    "저당": "식후 혈당 출렁임 감소.",
+    "저염": "붓기 완화·혈압 관리.",
+    "건강한지방": "포만감·지용성 비타민 흡수 도우미."
+}
+NUTRIENT_SOURCES = {
+    "단백질": ["닭가슴살", "두부", "연어", "계란", "대구구이", "요거트"],
+    "식이섬유": ["현미밥", "귀리", "브로콜리", "양배추", "아보카도", "버섯"],
+    "철": ["시금치", "귀리", "붉은살 생선", "콩류"],
+    "칼슘": ["두부", "브로콜리", "요거트", "아몬드"],
+    "마그네슘": ["현미밥", "시금치", "견과류"],
+    "칼륨": ["아보카도", "바나나", "감자", "시금치"],
+    "오메가3": ["연어", "등푸른 생선", "호두"],
+    "비타민A": ["당근", "시금치", "호박"],
+    "비타민B": ["버섯", "통곡물", "달걀"],
+    "비타민C": ["브로콜리", "양배추", "키위", "파프리카"],
+    "비타민D": ["계란", "연어", "버섯(일광 건조)"],
+    "비타민E": ["올리브유", "아몬드", "아보카도"],
+    "저당": ["채소 위주 반찬", "통곡물 소량", "무가당 요거트"],
+    "저염": ["구운/찐 조리", "양념절제", "허브·레몬 활용"],
+    "건강한지방": ["올리브유", "아보카도", "견과류"]
+}
+ ===============================
 # 이 블록은 기존 코드에 영향을 주지 않고, 페이지 하단에 "즉석 식단 평가" 섹션을 추가합니다.
 # 원 코드의 변수(food_db, CORE_NUTRIENTS, ESSENTIALS, gen_meal 등)가 있으면 그대로 활용하고,
 # 없으면 내부 기본값을 사용합니다.
@@ -960,6 +999,16 @@ try:
     st.divider()
     with st.container():
         st.header("⚡ 즉석 식단 평가 (저장 없이 분석)")
+
+        with st.expander("📘 영양소 한눈 요약 (무엇에 좋은가 + 대표 식품)", expanded=False):
+            df_gloss = pd.DataFrame([
+                {"영양소": k, "무엇에 좋은가(쉽게)": NUTRIENT_TIPS_LONG.get(k, NUTRIENT_TIPS.get(k, "")),
+                 "대표 식품": ", ".join(NUTRIENT_SOURCES.get(k, [])[:4])}
+                for k in CORE_NUTRIENTS if k in NUTRIENT_TIPS or k in NUTRIENT_TIPS_LONG
+            ])
+            st.dataframe(df_gloss, use_container_width=True, height=380)
+            st.caption("• 점수 표의 ‘한줄설명’과 동일한 톤으로 정리했습니다. 부족 태그가 뜨면 여기의 대표 식품을 참고해 다음 식사를 구성해보세요.")
+
         # 로컬 규칙 입력(원 코드의 사이드바 규칙과 별개로 이 섹션에서만 사용)
         colA, colB, colC, colD = st.columns([1.2,1.2,1,1])
         with colA:
@@ -977,7 +1026,48 @@ try:
         }
 
         sample = "쌀밥1, 대구구이1, 양배추1, 당근1, 올리브유0.5"
-        text_in = st.text_area("식단 텍스트 (쉼표/줄바꿈 구분)", height=120, placeholder=sample)
+        source_mode = st.radio("분석 소스", ["오늘 기록 사용", "직접 입력"], horizontal=True, index=0)
+sample = "쌀밥1, 대구구이1, 양배추1, 당근1, 올리브유0.5"
+text_in = st.text_area("식단 텍스트 (쉼표/줄바꿈 구분)", height=120, placeholder=sample,
+                       disabled=(source_mode=="오늘 기록 사용"))
+
+def _tokens_from_today_log():
+    import datetime as _dt
+    df = _ensure_log()
+    if df is None or df.empty:
+        return []
+    # Expect columns: type, date, time, food_norm, item
+    # Keep only today's entries up to now
+    today = _dt.datetime.now().date()
+    try:
+        df['date'] = pd.to_datetime(df['date']).dt.date
+    except Exception:
+        return []
+    df_today = df[(df['type']=='food') & (df['date']==today)].copy()
+    # If time exists, keep entries up to current time
+    now_time = _dt.datetime.now().time()
+    try:
+        df_today['time'] = pd.to_datetime(df_today['time'].astype(str), errors='coerce').dt.time
+        df_today = df_today[df_today['time'].isna() | (df_today['time'] <= now_time)]
+    except Exception:
+        pass
+    # Build tokens: prefer 'item' if present, else 'food_norm'
+    tokens = []
+    for _, r in df_today.iterrows():
+        token = (str(r.get('item') or '')).strip() or (str(r.get('food_norm') or '')).strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+if source_mode == "오늘 기록 사용":
+    _toks = _tokens_from_today_log()
+    if _toks:
+        # Show a preview of what's being analyzed
+        st.caption("오늘 기록에서 불러온 항목: " + ", ".join(_toks))
+        text_in = ", ".join(_toks)
+    else:
+        st.info("오늘 날짜의 음식 기록이 없어요. 직접 입력으로 전환해 주세요.")
+
 
         if st.button("분석하기", type="primary"):
             try:
