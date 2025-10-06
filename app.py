@@ -4,84 +4,6 @@ import pandas as pd
 import json, re, random, time, os, io, zipfile, math
 from datetime import date, time as dtime, datetime
 
-# === Bilingual Tag & Nutrient Normalization Utilities ===
-def _normalize_token(s: str) -> str:
-    return (
-        s.strip()
-         .replace("-", "")
-         .replace("_", "")
-         .replace(" ", "")
-         .lower()
-    )
-
-# Canonical tags we support (add as needed):
-# "essential", "optional", "all", "core", "extras" etc.
-_TAG_ALIAS = {
-    # essential
-    "essential": "essential",
-    "essentials": "essential",
-    "필수": "essential",
-    "에센셜": "essential",
-    "기본": "essential",
-    "중요": "essential",
-    # optional / extras
-    "optional": "optional",
-    "옵션": "optional",
-    "선택": "optional",
-    "추가": "optional",
-    "부가": "optional",
-    "extras": "optional",
-    "extra": "optional",
-    # all
-    "all": "all",
-    "전체": "all",
-    "모두": "all",
-    # core
-    "core": "core",
-    "코어": "core",
-    "핵심": "core",
-    # missing/sufficient filters (if you tag results)
-    "부족": "insufficient",
-    "insufficient": "insufficient",
-    "충분": "ok",
-    "sufficient": "ok",
-}
-
-def normalize_tag(tag: str) -> str:
-    k = _normalize_token(tag)
-    return _TAG_ALIAS.get(k, tag)  # if unknown, pass-through
-
-# Nutrient alias map (optional but helpful if nutrients appear as tags/keys)
-_NUTR_ALIAS = {
-    # vitamins
-    "a":"VitaminA","비타민a":"VitaminA","비타민에이":"VitaminA","vitamina":"VitaminA",
-    "b":"VitaminB","비타민b":"VitaminB","비타민비":"VitaminB","vitaminb":"VitaminB",
-    "c":"VitaminC","비타민c":"VitaminC","비타민씨":"VitaminC","vitaminc":"VitaminC",
-    "d":"VitaminD","비타민d":"VitaminD","비타민디":"VitaminD","vitamind":"VitaminD",
-    "e":"VitaminE","비타민e":"VitaminE","비타민이":"VitaminE","vitamine":"VitaminE",
-    "k":"VitaminK","비타민k":"VitaminK","비타민케이":"VitaminK","vitamink":"VitaminK",
-    # minerals
-    "fe":"Iron","철":"Iron","철분":"Iron","iron":"Iron",
-    "mg":"Magnesium","마그네슘":"Magnesium","magnesium":"Magnesium",
-    "kpotassium":"Potassium","칼륨":"Potassium","potassium":"Potassium",
-    "ca":"Calcium","칼슘":"Calcium","calcium":"Calcium",
-    "iodine":"Iodine","요오드":"Iodine","아이오딘":"Iodine",
-    # macros/others
-    "protein":"Protein","단백질":"Protein",
-    "lightprotein":"LightProtein","라이트단백질":"LightProtein","경단백질":"LightProtein",
-    "complexcarb":"ComplexCarb","복합탄수화물":"ComplexCarb","복합탄수":"ComplexCarb",
-    "healthyfat":"HealthyFat","건강한지방":"HealthyFat",
-    "fiber":"Fiber","식이섬유":"Fiber",
-    "omega3":"Omega3","오메가3":"Omega3","오메가삼":"Omega3",
-    "hydration":"Hydration","수분":"Hydration","수분보충":"Hydration",
-    "circulation":"Circulation","순환":"Circulation","혈액순환":"Circulation",
-}
-
-def normalize_nutrient_key(key: str) -> str:
-    k = _normalize_token(key)
-    return _NUTR_ALIAS.get(k, key)
-
-
 st.set_page_config(page_title="민감도 식사 로그 • 현실형 제안 (안정화)", page_icon="🥣", layout="wide")
 
 def _force_rerun():
@@ -1341,24 +1263,3 @@ except Exception:
 # ==== [END ADDON] =============================================================
 
 # ==== [END ADDON] =============================================================
-
-# Ensure canonical tag for widget selections (use like: selected = canonicalize_widget_tag(selected))
-def canonicalize_widget_tag(value: str) -> str:
-    try:
-        return normalize_tag(value)
-    except Exception:
-        return value
-
-
-# === Apply tag aliases for category lookups ===
-def get_category_items(categories: dict, tag: str):
-    canon = normalize_tag(tag)
-    if canon in categories:
-        return categories[canon]
-    # Try to find by alias key conversion (e.g., user used '필수' key in config)
-    # Build once a mapping from alias keys to canonical if needed.
-    for k in list(categories.keys()):
-        nk = normalize_tag(str(k))
-        if nk != k and nk not in categories:
-            categories[nk] = categories[k]
-    return categories.get(canon, [])
