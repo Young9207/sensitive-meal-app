@@ -638,8 +638,8 @@ with tab3:
     try:
         with open(LOG_PATH, "rb") as f:
             st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
-                if os.path.exists(USER_RULES_PATH):
-            with open(USER_RULES_PATH, "rb") as f:
+            if os.path.exists(USER_RULES_PATH):
+                with open(USER_RULES_PATH, "rb") as f:
                 st.download_button("⬇️ user_rules.json 다운로드", data=f, file_name="user_rules.json", mime="application/json")
         if st.button("📦 전체 백업 ZIP 만들기"):
             mem_zip = io.BytesIO()
