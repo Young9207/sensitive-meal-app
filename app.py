@@ -16,6 +16,66 @@ def _force_rerun():
             pass
 
 
+
+# === nutrient_dict.csv 연동 ===
+NUTRIENT_TIPS = dict(globals().get("NUTRIENT_TIPS", {}))  # 짧은 한줄설명
+NUTRIENT_TIPS_LONG = dict(globals().get("NUTRIENT_TIPS_LONG", {}))  # 자세한설명
+BENEFIT_MAP = dict(globals().get("BENEFIT_MAP", {}))  # 태그 → 베네핏 라벨/설명
+NUTRIENT_EXAMPLES = dict(globals().get("NUTRIENT_EXAMPLES", {}))  # 영양소 → 대표식품 예시 리스트
+
+def _load_nutrient_dict_csv(paths=("data/nutrient_dict.csv", "/mnt/data/nutrient_dict.csv")):
+    """
+    nutrient_dict.csv 스키마:
+      - 영양소
+      - 한줄설명
+      - 자세한설명
+      - 혜택라벨(요약)
+      - 대표식품(쉼표로구분)
+    """
+    import pandas as _pd, os as _os
+    for _p in paths:
+        try:
+            if _os.path.exists(_p):
+                _df = _pd.read_csv(_p)
+                for _, _r in _df.iterrows():
+                    key = str(_r.get("영양소") or "").strip()
+                    if not key:
+                        continue
+                    short = str(_r.get("한줄설명") or "").strip()
+                    long = str(_r.get("자세한설명") or "").strip()
+                    label = str(_r.get("혜택라벨(요약)") or "").strip()
+                    examples = str(_r.get("대표식품(쉼표로구분)") or "").strip()
+
+                    if short:
+                        NUTRIENT_TIPS[key] = short
+                    if long:
+                        NUTRIENT_TIPS_LONG[key] = long
+                    # BENEFIT_MAP은 가능한 간결한 라벨을 우선
+                    if label:
+                        BENEFIT_MAP[key] = label
+                    elif short:
+                        BENEFIT_MAP[key] = short
+
+                    if examples:
+                        NUTRIENT_EXAMPLES[key] = [x.strip() for x in examples.split(",") if x.strip()]
+                return True
+        except Exception:
+            pass
+    return False
+
+# 최초 로드 시도
+try:
+    _nd_ok = _load_nutrient_dict_csv()
+    if _nd_ok:
+        if debug:
+            st.caption("✅ nutrient_dict.csv 로드됨")
+    else:
+        if debug:
+            st.caption("ℹ️ nutrient_dict.csv를 찾지 못했거나 컬럼이 맞지 않습니다.")
+except Exception as _e:
+    if 'st' in globals() and debug:
+        st.warning("nutrient_dict.csv 로드 중 오류 발생")
+        st.exception(_e)
 FOOD_DB_PATH = "food_db.csv"
 LOG_PATH = "log.csv"
 USER_RULES_PATH = "user_rules.json"
@@ -1205,7 +1265,7 @@ try:
                     .reset_index().rename(columns={"index": "영양소", 0: "점수"})
                     .sort_values("점수", ascending=False)
                 )
-                score_df["한줄설명"] = score_df["영양소"].map(lambda x: NUTRIENT_TIPS.get(x, ""))
+                score_df["한줄설명"] = score_df["영양소"].map(lambda x: (BENEFIT_MAP.get(x) or NUTRIENT_TIPS.get(x, "")))
                 st.dataframe(score_df, use_container_width=True, height=320)
 
                 missing = [n for n in ESSENTIALS if scores.get(n, 0) < 1]
