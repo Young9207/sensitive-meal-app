@@ -92,21 +92,20 @@ def _ensure_taglist(lst_from_row: Any, fallback_slash: Any) -> List[str]:
 
 def load_food_db_simple(path: str = FOOD_DB_CSV) -> pd.DataFrame:
     df = pd.read_csv(path)
-    # 보장 컬럼
+
+    # 필수 컬럼 보장
     for c in ["식품", "등급", "태그(영양)"]:
         if c not in df.columns:
             df[c] = ""
-    # 태그리스트 정규화
-    if "태그리스트" not in df.columns:
-        df["태그리스트"] = df["태그(영양)"].apply(_parse_tags_from_slash)
+
+    # 태그리스트 정규화 (있든 없든 항상 리스트로)
+    if "태그리스트" in df.columns:
+        df["태그리스트"] = df["태그리스트"].apply(_parse_taglist_cell)
     else:
-        df["태그리스트"] = [
-            _ensure_taglist(row.get("태그리스트", None), row.get("태그(영양)", None))
-            if isinstance(row, dict) else _ensure_taglist(df.loc[i, "태그리스트"], df.loc[i, "태그(영양)"])
-            for i, row in enumerate([{}]*len(df))
-        ]
-    # 최소 컬럼 반환
+        df["태그리스트"] = df["태그(영양)"].apply(_parse_tags_from_slash)
+
     return df[["식품", "등급", "태그(영양)", "태그리스트"]]
+
 
 
 def load_nutrient_dict_simple(path: str = NUTRIENT_DICT_CSV) -> Dict[str, str]:
@@ -240,8 +239,21 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
     )
 
 
-def summarize_nutrients(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str], threshold: int = 1) -> pd.DataFrame:
-    all_tags = sorted({t for tlist in df_food["태그리스트"].apply(_parse_taglist_cell) for t in tlist})
+def summarize_nutrients(
+    nutrient_counts: Dict[str, float],
+    df_food: pd.DataFrame,
+    nutrient_desc: Dict[str, str],
+    threshold: int = 1
+) -> pd.DataFrame:
+    # 태그 우주
+    all_tags = sorted({
+        t for tlist in df_food["태그리스트"].apply(_parse_taglist_cell) for t in tlist
+    })
+
+    # 태그가 하나도 없으면 '빈 테이블이지만 컬럼은 있는' DataFrame 반환
+    if not all_tags:
+        return pd.DataFrame(columns=["영양소", "수량합", "상태", "한줄설명"])
+
     rows = []
     for tag in all_tags:
         cnt = float(nutrient_counts.get(tag, 0))
@@ -251,7 +263,9 @@ def summarize_nutrients(nutrient_counts: Dict[str, float], df_food: pd.DataFrame
             "상태": "충족" if cnt >= threshold else "부족",
             "한줄설명": nutrient_desc.get(tag, "")
         })
-    return pd.DataFrame(rows).sort_values(["상태", "수량합", "영양소"], ascending=[True, False, True])
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(["상태", "수량합", "영양소"], ascending=[True, False, True])
 
 
 def recommend_next_meal(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str],
