@@ -1,13 +1,16 @@
 
 import streamlit as st
 import pandas as pd
-import json
-from datetime import datetime, date
+import json, random, time
+from datetime import date, time as dtime, datetime
 
-st.set_page_config(page_title="민감도 식사 분석", page_icon="🥣", layout="wide")
+st.set_page_config(page_title="민감도 식사 로그 • 제안 강화", page_icon="🥣", layout="wide")
 
 FOOD_DB_PATH = "food_db.csv"
-LOG_PATH = "meals_log.csv"
+LOG_PATH = "log.csv"
+
+SLOTS = ["오전","오전 간식","점심","오후","오후 간식","저녁"]
+EVENT_TYPES = ["food","supplement","symptom","sleep","stool","note"]
 
 CORE_NUTRIENTS = ["Protein","LightProtein","ComplexCarb","HealthyFat","Fiber",
                   "A","B","C","D","E","K","Fe","Mg","Omega3","K_potassium",
@@ -15,178 +18,347 @@ CORE_NUTRIENTS = ["Protein","LightProtein","ComplexCarb","HealthyFat","Fiber",
 
 ESSENTIALS = ["Protein","ComplexCarb","Fiber","B","C","A","K","Mg","Omega3","K_potassium","HealthyFat","D"]
 
-GAP_MAP = {
-    "Protein": "대구 100g 또는 치킨 100g",
-    "ComplexCarb": "현미 1/2공기 또는 고구마 1/2개",
-    "Fiber": "브로콜리 1/2컵 또는 양배추 1/2컵",
-    "B": "귀리 1/2공기 또는 현미 소량",
-    "C": "사과 1/2개 또는 키위",
-    "A": "단호박 1/2컵 또는 당근 1/2개",
-    "K": "시금치/브로콜리 1/2컵",
-    "Mg": "아보카도 소량 또는 아몬드 5알",
-    "Omega3": "연어 80g 또는 고등어 80g",
-    "K_potassium": "단호박 1/2컵 또는 미역국 반그릇",
-    "HealthyFat": "들기름 1작은술 또는 올리브유 1작은술",
-    "D": "연어 80g 또는 햇빛 20분"
+SUGGEST_MODES = ["기본","저자극(역류/메스꺼움)","저염(붓기/절임 후)","샐러드","죽","외식용"]
+
+SUPP_ALERT_KEYWORDS = {
+    "효모": ("Avoid","효모 반응 ↑: 빵/맥주/맥주효모 주의"),
+    "맥주효모": ("Avoid","효모 반응 ↑: 맥주효모 회피 권장"),
+    "카제인": ("Avoid","유제품·카제인 반응 ↑"),
+    "유청": ("Avoid","유제품계 단백(유청) 주의"),
+    "whey": ("Avoid","유제품계 단백(유청) 주의"),
+    "casein": ("Avoid","유제품·카제인 반응 ↑"),
+    "gluten": ("Avoid","글루텐 회피 권장(글리아딘 반응 ↑)"),
+    "corn": ("Caution","옥수수 경계: 폴렌타/콘가공품 주의"),
 }
 
-def load_food_db():
-    df = pd.read_csv(FOOD_DB_PATH)
-    # ensure tags parsed
-    def parse_tags(x):
-        try:
-            return json.loads(x)
-        except Exception:
-            return [t.strip() for t in str(x).split(",") if t.strip()]
-    df["태그(영양)"] = df["태그(영양)"].apply(parse_tags)
-    if "민감_제외_권장" not in df.columns:
-        df["민감_제외_권장"] = False
-    return df
-
-def init_log():
-    cols = ["date","meal","food","servings"]
+# ---------- I/O ----------
+def ensure_log():
+    cols = ["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]
     try:
         log = pd.read_csv(LOG_PATH)
-        # basic schema guard
         for c in cols:
             if c not in log.columns:
-                raise ValueError
+                log[c] = "" if c not in ["qty"] else 0
+        log = log[cols]
         return log
     except Exception:
         log = pd.DataFrame(columns=cols)
         log.to_csv(LOG_PATH, index=False)
         return log
 
+def load_food_db():
+    df = pd.read_csv(FOOD_DB_PATH, encoding="utf-8", engine="python")
+    if "태그(영양)" in df.columns:
+        def parse_tags(x):
+            try:
+                return json.loads(x)
+            except Exception:
+                return [t.strip() for t in str(x).split(",") if t.strip()]
+        df["태그(영양)"] = df["태그(영양)"].apply(parse_tags)
+    else:
+        df["태그(영양)"] = [[] for _ in range(len(df))]
+    if "민감_제외_권장" not in df.columns:
+        df["민감_제외_권장"] = False
+    if "등급" not in df.columns:
+        df["등급"] = df["민감_제외_권장"].apply(lambda x: "Caution" if x else "Safe")
+    if "식품" not in df.columns and "항목_한글" in df.columns:
+        df = df.rename(columns={"항목_한글":"식품"})
+    if "식품군" not in df.columns:
+        df["식품군"] = ""
+    return df
+
+def weekday_ko(dt: date):
+    return ["MON","TUE","WED","THU","FRI","SAT","SUN"][dt.weekday()]
+
+def add_log_row(log, date_str, t_str, slot, typ, item, qty, food_norm, grade, flags, tags, source="manual"):
+    new = pd.DataFrame([{
+        "date": date_str,
+        "weekday": weekday_ko(datetime.strptime(date_str,"%Y-%m-%d").date()),
+        "time": t_str,
+        "slot": slot,
+        "type": typ,
+        "item": item,
+        "qty": qty,
+        "food_norm": food_norm,
+        "grade": grade,
+        "flags": flags,
+        "tags": json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else (tags or ""),
+        "source": source
+    }])
+    log = pd.concat([log, new], ignore_index=True)
+    log.to_csv(LOG_PATH, index=False)
+    return log
+
+# ---------- Scoring ----------
 def score_day(df_log, df_food, date_str):
-    day = df_log[df_log["date"]==date_str]
-    score = {k:0 for k in CORE_NUTRIENTS}
+    day = df_log[(df_log["date"]==date_str) & (df_log["type"]=="food")]
+    score = {k:0.0 for k in CORE_NUTRIENTS}
     for _, row in day.iterrows():
-        food = row["food"]
-        servings = float(row.get("servings", 1.0) or 1.0)
-        recs = df_food[df_food["식품"]==food]
+        fn = row.get("food_norm") or row.get("item")
+        try:
+            qty = float(row.get("qty") or 1.0)
+        except Exception:
+            qty = 1.0
+        recs = df_food[df_food["식품"]==fn]
         if recs.empty:
             continue
         tags = recs.iloc[0]["태그(영양)"]
         for t in tags:
             if t in score:
-                score[t] += servings
+                score[t] += qty
     return score
 
-def suggest_next_meal(scores, sodium_heavy=False, symptom=None):
-    low = [n for n in ESSENTIALS if scores.get(n,0) < 1]
-    suggestions = []
-
-    if symptom in ("복부팽만","메스꺼움"):
-        suggestions.append(("저자극 회복식",
-            ["쌀 죽 1그릇","대구 100g 찜","애호박 1컵(데침)","보리차 1잔"],
-            ["Protein","LightProtein","ComplexCarb","Fiber","Hydration"]))
-    elif symptom in ("오른쪽윗배묵직","몸무거움") or sodium_heavy:
-        suggestions.append(("간·순환 보조(저염)",
-            ["귀리죽 또는 현미죽 1그릇",
-             "연어 80~100g(구이/찜) 또는 대구 100g",
-             "브로콜리 1컵 + 단호박 1/2~1컵",
-             "들기름 또는 올리브유 1작은술",
-             "루이보스티 또는 보리차"],
-            ["A","B","C","K","Omega3","D","HealthyFat","Hydration"]))
-    elif symptom == "피로":
-        suggestions.append(("피로·집중 보완",
-            ["현미 1/2공기","치킨(안심) 100g",
-             "시금치 1/2접시 + 사과 1/2개","올리브유 1작은술"],
-            ["Protein","B","Fe","Mg","C","HealthyFat"]))
+# ---------- Suggestion engine ----------
+def build_baskets(df, include_caution=False):
+    pool = df.copy()
+    if not include_caution:
+        pool = pool[pool["등급"]=="Safe"]
     else:
-        suggestions.append(("균형 한 끼",
-            ["치킨(안심) 100g 또는 대구 100g",
-             "시금치/양배추/브로콜리 중 2가지",
-             "현미 1/2공기","올리브유 1작은술","사과 1/2개"],
-            ["Protein","B","C","K","HealthyFat","Fiber"]))
+        pool = pool[pool["등급"].isin(["Safe","Caution"])]
+    proteins = pool[(pool["식품군"].isin(["생선/해산물","육류"])) & (pool["태그(영양)"].apply(lambda t: "Protein" in t))]["식품"].tolist()
+    vegs = pool[(pool["식품군"]=="채소") & (pool["태그(영양)"].apply(lambda t: "Fiber" in t))]["식품"].tolist()
+    carbs = pool[(pool["태그(영양)"].apply(lambda t: "ComplexCarb" in t))]["식품"].tolist()
+    fats = pool[(pool["태그(영양)"].apply(lambda t: "HealthyFat" in t))]["식품"].tolist()
+    return {"protein":proteins, "veg":vegs, "carb":carbs, "fat":fats}
 
-    gap_sides = [GAP_MAP[g] for g in low if g in GAP_MAP][:3]
-    if gap_sides:
-        suggestions.append(("부족 영양 보완 사이드", gap_sides, low))
-    return suggestions, low
+def mode_filters(mode):
+    avoid_keywords = []
+    comp = {"protein":1,"veg":2,"carb":1,"fat":1}
+    if mode=="저자극(역류/메스꺼움)":
+        avoid_keywords += ["커피","홍차","초콜릿","오렌지","레몬","라임","붉은 고추","스파이시"]
+    if mode=="저염(붓기/절임 후)":
+        avoid_keywords += ["절임","젓갈","우메보시","김치"]
+    if mode=="샐러드":
+        comp = {"protein":1,"veg":2,"fat":1}  # no carb
+    if mode=="죽":
+        comp = {"protein":1,"veg":1,"carb":1,"fat":1}
+    if mode=="외식용":
+        # keep comp; just avoid tricky items
+        avoid_keywords += ["튀김","프라이","크림"]
+    return avoid_keywords, comp
 
-# -------------------- UI --------------------
-st.title("🥣 민감도 식사 분석 (Streamlit)")
+def filter_keywords(items, kws):
+    res = []
+    for it in items:
+        if any(k in it for k in kws):
+            continue
+        res.append(it)
+    return res
+
+def pick_diverse(candidates, recent, need, rng):
+    # avoid items in recent; if insufficient, allow but minimize repeats
+    pool = [c for c in candidates if c not in recent]
+    if len(pool) >= need:
+        rng.shuffle(pool)
+        return pool[:need]
+    # fallback
+    left = need - len(pool)
+    rng.shuffle(pool)
+    repeat_pool = [c for c in candidates if c in recent]
+    rng.shuffle(repeat_pool)
+    return pool + repeat_pool[:left]
+
+def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng):
+    baskets = build_baskets(df_food, include_caution=include_caution)
+    avoid_kws, comp = mode_filters(mode)
+    # apply keyword filters
+    for k in list(baskets.keys()):
+        baskets[k] = filter_keywords(baskets[k], avoid_kws)
+
+    # add simple nutrient favoring by reordering candidates
+    def favor(lst, tag):
+        if not lst: return lst
+        scored = []
+        for name in lst:
+            tags = df_food[df_food["식품"]==name].iloc[0]["태그(영양)"]
+            score = sum(1 for t in favor_tags if t in tags)
+            scored.append((score, name))
+        scored.sort(key=lambda x: (-x[0], rng.random()))
+        return [n for _, n in scored]
+
+    baskets["protein"] = favor(baskets["protein"], favor_tags)
+    baskets["veg"] = favor(baskets["veg"], favor_tags)
+    baskets["carb"] = favor(baskets["carb"], favor_tags)
+    baskets["fat"] = favor(baskets["fat"], favor_tags)
+
+    meal = []
+    for key, need in comp.items():
+        chosen = pick_diverse(baskets[key], recent_items, need, rng)
+        meal += chosen
+    return meal
+
+def supplement_flag(text):
+    if not text: return ("","")
+    t = text.lower()
+    for key, (grade,msg) in SUPP_ALERT_KEYWORDS.items():
+        if key in t:
+            return (grade, msg)
+    return ("","")
+
+# ---------- App ----------
+# auto-refresh for live updates
+st_autorefresh = st.sidebar.checkbox("자동 새로고침(15초)", value=False)
+if st_autorefresh:
+    st.runtime.legacy_caching.clear_cache()
+    st.experimental_rerun  # placeholder (Streamlit handles rerun on each call)
+    st.autorefresh = st.experimental_singleton(lambda: None)
+    st.experimental_rerun
 
 food_db = load_food_db()
-log = init_log()
+log = ensure_log()
 
-tabs = st.tabs(["📥 식사 기록","📊 오늘 요약","🧘 컨디션 & 다음 끼니","📚 FoodDB 편집"])
+st.title("🥣 민감도 식사 로그 • 제안 강화")
 
-with tabs[0]:
-    st.subheader("📥 식사 기록")
-    today = st.date_input("날짜", value=date.today())
-    meal = st.selectbox("끼니", ["아침","점심","저녁","간식"])
-    # Allow include/exclude sensitive foods
-    show_sensitives = st.checkbox("민감_제외_권장 식품 포함해서 보기", value=False)
-    df_view = food_db if show_sensitives else food_db[food_db["민감_제외_권장"]==False]
-    # group by 식품군 for nicer UI
-    group = st.selectbox("식품군", sorted(df_view["식품군"].unique()))
-    choices = df_view[df_view["식품군"]==group]["식품"].sort_values().tolist()
-    picked = st.multiselect("식품 선택 (여러 개 가능)", choices)
-    servings = st.number_input("분량 배수(기본 1.0)", min_value=0.25, max_value=3.0, value=1.0, step=0.25)
+tab1, tab2, tab3 = st.tabs(["📝 기록","📊 요약/제안","📤 내보내기"])
 
-    if st.button("로그에 추가"):
-        for p in picked:
-            log = pd.concat([log, pd.DataFrame([{
-                "date": today.strftime("%Y-%m-%d"),
-                "meal": meal,
-                "food": p,
-                "servings": servings
-            }])], ignore_index=True)
-        log.to_csv(LOG_PATH, index=False)
-        st.success(f"{len(picked)}개 항목을 저장했습니다.")
-        st.dataframe(log.tail(10), use_container_width=True)
+with tab1:
+    colL, colR = st.columns([2,1])
+    with colL:
+        st.subheader("오늘 기록")
+        d = st.date_input("날짜", value=date.today())
+        slot = st.selectbox("슬롯(시간대)", SLOTS, index=2)
+        t = st.time_input("시각", value=dtime(hour=12, minute=0))
+        typ = st.radio("기록 종류", EVENT_TYPES, horizontal=True, index=0)
+        qty = st.number_input("분량/개수(가능시)", min_value=0.0, max_value=10.0, value=1.0, step=0.5)
+        show_sens = st.checkbox("경계/회피 식품도 목록에 보여주기", value=False)
 
-with tabs[1]:
-    st.subheader("📊 오늘 영양 점수")
-    today = st.date_input("요약할 날짜", value=date.today(), key="sumdate")
-    date_str = today.strftime("%Y-%m-%d")
-    day_log = log[log["date"]==date_str]
-    st.write("오늘 로그", day_log)
+        food_norm=""; grade=""; flags=""; tags=[]
 
+        if typ=="food":
+            df_view = food_db.copy()
+            if not show_sens:
+                df_view = df_view[df_view["등급"]=="Safe"]
+            group = st.selectbox("식품군", ["(전체)"] + sorted(df_view["식품군"].dropna().unique().tolist()))
+            if group != "(전체)":
+                df_view = df_view[df_view["식품군"]==group]
+            query = st.text_input("검색(식품명 일부)", value="")
+            if query.strip():
+                df_view = df_view[df_view["식품"].str.contains(query.strip(), case=False, na=False)]
+            food_norm = st.selectbox("식품 선택", [""] + sorted(df_view["식품"].tolist()))
+            item = st.text_input("메모(예: 사과1 / 요거트·시나몬)", value="")
+
+            if food_norm:
+                rec = food_db[food_db["식품"]==food_norm].iloc[0]
+                grade = rec.get("등급","Safe")
+                tags = rec.get("태그(영양)",[])
+                badge = "🟢 Safe" if grade=="Safe" else ("🟡 Caution" if grade=="Caution" else "🔴 Avoid")
+                st.markdown(f"**등급:** {badge}  •  **태그:** {', '.join(tags) if tags else '-'}")
+                if grade=="Avoid":
+                    st.error("검사 기준: 회피 권장 항목입니다.")
+                elif grade=="Caution":
+                    st.warning("검사 기준: 경계 항목입니다. 순환/소량 권장.")
+
+            if st.button("➕ 로그 저장", type="primary"):
+                date_str = d.strftime("%Y-%m-%d")
+                t_str = t.strftime("%H:%M")
+                log = add_log_row(log, date_str, t_str, slot, typ, item, qty, food_norm, grade, flags, tags, source="manual")
+                st.success("저장되었습니다.")
+        else:
+            item = st.text_input("내용 입력", value="")
+            if typ=="supplement":
+                g, flags = supplement_flag(item)
+                grade = g
+                if g=="Avoid":
+                    st.error(flags or "주의 보충제")
+                elif g=="Caution":
+                    st.warning(flags or "경계 보충제")
+            if st.button("➕ 로그 저장", type="primary"):
+                date_str = d.strftime("%Y-%m-%d")
+                t_str = t.strftime("%H:%M")
+                log = add_log_row(log, date_str, t_str, slot, typ, item, qty, "", grade, flags, [], source="manual")
+                st.success("저장되었습니다.")
+
+        st.markdown("---")
+        st.caption("최근 기록")
+        st.dataframe(log.sort_values(["date","time"]).tail(20), use_container_width=True, height=240)
+
+    with colR:
+        st.subheader("오늘 영양 점수")
+        dsum = st.date_input("요약 날짜", value=date.today(), key="sumdate_1")
+        date_str = dsum.strftime("%Y-%m-%d")
+        day = log[log["date"]==date_str]
+        sodium_heavy = any(k in (day["item"].fillna("") + " " + day["food_norm"].fillna("")).str.cat(sep=" ")
+                           for k in ["김치","우메보시","절임","장아찌","젓갈"])
+        scores = score_day(log, food_db, date_str)
+        score_df = pd.DataFrame([scores]).T.reset_index()
+        score_df.columns = ["영양소","점수"]
+        st.dataframe(score_df, use_container_width=True, height=300)
+
+with tab2:
+    st.subheader("다음 끼니 제안(3가지)")
+    dsum = st.date_input("기준 날짜", value=date.today(), key="sumdate_2")
+    date_str = dsum.strftime("%Y-%m-%d")
     scores = score_day(log, food_db, date_str)
-    score_df = pd.DataFrame([scores]).T.reset_index()
-    score_df.columns = ["영양소","점수"]
-    st.dataframe(score_df, use_container_width=True)
+    # 부족 태그 계산
+    favor_tags = [n for n in ESSENTIALS if scores.get(n,0)<1]
+    # 증상 수집
+    day = log[log["date"]==date_str]
+    sym_today = day[day["type"]=="symptom"]["item"].str.cat(sep=" ").lower()
+    symptoms = []
+    for key in ["역류","신물","메스꺼움","복부팽만","붓기","피로"]:
+        if key in sym_today:
+            symptoms.append(key)
+    # 모드 & 옵션
+    mode = st.selectbox("제안 모드", SUGGEST_MODES, index=0)
+    include_caution = st.checkbox("경계(Caution) 포함", value=False)
+    diversity_n = st.slider("다양화(최근 N회 중복 회피)", min_value=0, max_value=10, value=5, step=1)
+    # 최근 N회 재료 수집
+    recent_items = []
+    if diversity_n>0:
+        recent_df = log[log["type"]=="food"].sort_values(["date","time"]).tail(diversity_n*5)
+        recent_items = (recent_df["food_norm"].fillna("") + "|" + recent_df["item"].fillna("")).tolist()
+        # normalize to just food_norm names if exist
+        recent_items = [x.split("|")[0] for x in recent_items if x]
+    # RNG seed 버튼
+    if "seed" not in st.session_state:
+        st.session_state.seed = int(time.time())
+    if st.button("🔀 다른 조합 보기"):
+        st.session_state.seed = random.randint(1, 10**9)
+    rng = random.Random(st.session_state.seed)
 
-    # sodium heavy heuristic
-    sodium_heavy = any(x in ["총각김치","깻잎절임","우메보시"] for x in day_log["food"].tolist())
-    st.caption(f"염분 높은 절임/발효식 포함 여부: {'예' if sodium_heavy else '아니요'}")
+    # sodium mode auto if needed
+    if any(k in symptoms for k in ["붓기"]) or any(term in sym_today for term in ["절임","젓갈","우메보시","김치"]):
+        if mode=="기본":
+            mode = "저염(붓기/절임 후)"
 
-with tabs[2]:
-    st.subheader("🧘 컨디션 체크 & 다음 끼니 제안")
-    col1, col2 = st.columns(2)
-    with col1:
-        symptom = st.selectbox("지금 상태", ["없음","복부팽만","메스꺼움","몸무거움","오른쪽윗배묵직","피로"])
-    with col2:
-        date_sel = st.date_input("기준 날짜", value=date.today(), key="symdate")
-        dstr = date_sel.strftime("%Y-%m-%d")
-        s_today = score_day(log, food_db, dstr)
-        sodium_heavy = any(x in ["총각김치","깻잎절임","우메보시"] for x in log[log["date"]==dstr]["food"].tolist())
+    # 모드가 저자극이면 favor_tags에서 산성 쪽은 제외 가중(간단)
+    if mode=="저자극(역류/메스꺼움)":
+        # not implementing complex reweight; keywords handled in mode_filters
+        pass
 
-    sug, gaps = suggest_next_meal(s_today, sodium_heavy=sodium_heavy, symptom=(None if symptom=="없음" else symptom))
-    for (title, items, targets) in sug:
-        st.markdown(f"**{title}**")
-        st.write("• " + " / ".join(items))
-        if isinstance(targets, list):
-            st.caption("보완 대상 영양소: " + ", ".join(targets))
+    # 3가지 제안 생성
+    cols = st.columns(3)
+    for idx in range(3):
+        meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, rng)
+        with cols[idx]:
+            st.markdown(f"**제안 {idx+1} — {mode}**")
+            if meal:
+                st.write("• " + " / ".join(meal))
+                if favor_tags:
+                    st.caption("부족 보완 우선 태그: " + ", ".join(favor_tags))
+                # 저장 버튼
+                if st.button(f"💾 이 조합 저장 (점심) — {idx+1}"):
+                    now = datetime.now().strftime("%H:%M")
+                    for token in meal:
+                        if token in food_db["식품"].values:
+                            rec = food_db[food_db["식품"]==token].iloc[0]
+                            add_log_row(log, date_str, now, "점심", "food", token, 1.0, token, rec.get("등급","Safe"), "", rec.get("태그(영양)",[]), source="suggested")
+                    st.success("저장 완료! 기록 탭에서 확인하세요.")
+            else:
+                st.info("조건을 만족하는 식품 풀이 부족합니다. FoodDB를 보강해주세요.")
 
-with tabs[3]:
-    st.subheader("📚 FoodDB 편집")
-    st.write("CSV를 직접 수정하거나 여기에서 추가/수정 후 저장하세요.")
-    st.dataframe(food_db, use_container_width=True)
-    with st.expander("항목 추가"):
-        new_food = st.text_input("식품명")
-        new_group = st.text_input("식품군 (예: 채소, 곡물류 등)")
-        new_serv = st.text_input("1회분 (예: 1컵)")
-        new_tags = st.text_input("태그(쉼표 구분, 예: Protein,B,C)")
-        new_avoid = st.checkbox("민감_제외_권장", value=False)
-        if st.button("추가/저장"):
-            tags = [t.strip() for t in new_tags.split(",") if t.strip()]
-            new_row = {"식품":new_food,"식품군":new_group,"1회분":new_serv,"태그(영양)":json.dumps(tags, ensure_ascii=False),"민감_제외_권장":new_avoid}
-            food_db = pd.concat([food_db, pd.DataFrame([new_row])], ignore_index=True)
-            food_db.to_csv(FOOD_DB_PATH, index=False)
-            st.success("저장 완료! 앱을 새로고침하세요.")
+with tab3:
+    st.subheader("내보내기/백업")
+    # Download buttons
+    with open(LOG_PATH, "rb") as f:
+        st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
+    with open(FOOD_DB_PATH, "rb") as f:
+        st.download_button("⬇️ food_db.csv 다운로드", data=f, file_name="food_db.csv", mime="text/csv")
 
-st.sidebar.info("Tip: 매 끼니는 '채소 1/2 + 단백질 1/4 + 복합탄수 1/4 + 좋은 지방 소량'을 기본으로 잡으세요.")
+    st.markdown("---")
+    st.caption("구글 드라이브에 업로드하려면 아래에 폴더(또는 MyDrive) 공유 링크를 붙여두고, 다운로드한 파일을 수동 업로드하세요.")
+    drive_url = st.text_input("내 구글 드라이브 폴더 링크(선택)", value="", help="예: https://drive.google.com/drive/folders/....")
+    if drive_url.strip():
+        st.markdown(f"[🟢 구글 드라이브 폴더 열기]({drive_url})")
+
+st.sidebar.info("제안 모드/경계 포함/다양화로 여러 조합을 만들어 보세요.")
