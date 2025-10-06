@@ -194,6 +194,41 @@ def match_item_to_foods(item: str, df_food: pd.DataFrame) -> pd.DataFrame:
     hits = hits[hits["식품"].apply(lambda x: len(_norm(x)) >= 1)]
     return hits
 
+from streamlit_javascript import st_javascript
+import json
+
+def save_state_to_localstorage():
+    """현재 st.session_state.inputs, last_items_df 등 localStorage에 저장"""
+    data = {
+        "inputs": st.session_state.get("inputs", {}),
+        "last_items_df": st.session_state.get("last_items_df", pd.DataFrame()).to_dict() if st.session_state.get("last_items_df") is not None else None,
+        "last_nutri_df": st.session_state.get("last_nutri_df", pd.DataFrame()).to_dict() if st.session_state.get("last_nutri_df") is not None else None,
+        "last_recs": st.session_state.get("last_recs", []),
+        "last_combo": st.session_state.get("last_combo", []),
+    }
+    js = f"""
+    localStorage.setItem('diet_state', JSON.stringify({json.dumps(data)}));
+    """
+    st_javascript(js)
+
+
+def load_state_from_localstorage():
+    """localStorage에 저장된 state 복원"""
+    js = "localStorage.getItem('diet_state');"
+    raw = st_javascript(js)
+    if raw:
+        try:
+            data = json.loads(raw)
+            st.session_state.inputs = data.get("inputs", {})
+            if "last_items_df" in data and data["last_items_df"]:
+                st.session_state.last_items_df = pd.DataFrame(data["last_items_df"])
+            if "last_nutri_df" in data and data["last_nutri_df"]:
+                st.session_state.last_nutri_df = pd.DataFrame(data["last_nutri_df"])
+            st.session_state.last_recs = data.get("last_recs", [])
+            st.session_state.last_combo = data.get("last_combo", [])
+        except Exception as e:
+            st.warning(f"상태 복원 실패: {e}")
+
 
 def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nutrient_desc: Dict[str, str]):
     """슬롯 단위 분석 → (items_df, nutrient_counts(dict), log_df, unmatched_names(list))"""
@@ -499,7 +534,10 @@ def main():
     init_daily_state()
     remain = (next_midnight() - datetime.now(KST))
     st.caption(f"현재 입력/결과는 **자정까지 자동 보존**됩니다. 남은 시간: 약 {remain.seconds//3600}시간 {remain.seconds%3600//60}분")
+    # ✅ 브라우저 localStorage에서 이전 상태 복원
+    load_state_from_localstorage()
 
+ 
     # 파일 로딩
     with st.expander("데이터 파일 경로 설정", expanded=False):
         food_path = st.text_input("food_db.csv 경로", value=FOOD_DB_CSV)
