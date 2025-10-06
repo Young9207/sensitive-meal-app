@@ -330,6 +330,29 @@ MODE_ANCHORS = {
     }
 }
 
+
+# ---- Availability filters ----
+RARE_BLACKLIST = {
+    # 너무 구하기 힘들거나 비현실적인 것들
+    "따개비","멧돼지","타조","말고기","사슴고기","황새치","고둥","캐비어",
+    "퍼츠","각시서대속 어류","참돔","먹도미류","바틀피시","해덕","농어",
+}
+
+COMMON_WHITELIST = {
+    "protein": {"닭가슴살","대구","연어","돼지고기","소고기","계란(알레르기 없을 때)","고등어","참치(캔)"},
+    "veg": {"양배추","당근","브로콜리","애호박","오이","시금치","상추","무","감자","고구마","파프리카","토마토"},
+    "carb": {"쌀밥","쌀죽","고구마","감자","퀴노아","타피오카","옥수수죽(가능시)"},
+    "fat": {"올리브유","들기름","참기름","아보카도(가능시)","참깨"},
+    "fruit": {"사과","바나나","키위","블루베리","딸기","배"}
+}
+
+def apply_availability_filter(items, role_key, allow_rare=False):
+    if allow_rare:
+        # 그래도 희귀 블랙리스트는 제외
+        return [x for x in items if x not in RARE_BLACKLIST]
+    common = COMMON_WHITELIST.get(role_key, set())
+    return [x for x in items if (x in common) and (x not in RARE_BLACKLIST)]
+
 PANTRY = {
     "protein": ["대구","연어","닭가슴살","돼지고기","소고기","계란(알레르기 없을 때)"],
     "veg": ["양배추","당근","브로콜리","애호박","오이","시금치","상추","무"],
@@ -418,7 +441,7 @@ def pick_diverse(candidates, recent, need, rng):
     rng.shuffle(repeat_pool)
     return pool + repeat_pool[:left]
 
-def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user_rules):
+def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user_rules, allow_rare=False):
     """Return (title, items, explain)
     - items are built from MODE_ANCHORS[mode] prioritized, then general baskets
     - explain shows what was avoided (mode note and personal rules)
@@ -441,13 +464,15 @@ def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user
         scored.sort(key=lambda x: (-x[0], random.random()))
         return [n for _, n in scored]
     for key in baskets.keys():
-        # Merge anchors (if exist) at the front to be prioritized
+        # 1) 우선 앵커 병합
         if key in anchors:
             front = [x for x in anchors[key] if x in baskets[key]]
             rest = [x for x in baskets[key] if x not in front]
-            baskets[key] = favor(front) + favor(rest)
+            merged = favor(front) + favor(rest)
         else:
-            baskets[key] = favor(baskets[key])
+            merged = favor(baskets[key])
+        # 2) 가용성 필터 적용
+        baskets[key] = apply_availability_filter(merged, key, allow_rare=allow_rare)
     meal = []
     for key, need in comp.items():
         chosen = pick_diverse(baskets[key], recent_items, need, random)
@@ -482,6 +507,7 @@ st.title("🥣 민감도 식사 로그 • 현실형 제안 (안정화)")
 
 with st.sidebar:
     st.subheader("개인 규칙")
+    allow_rare = st.checkbox("희귀 식재료 포함", value=False, help="체크 해제 시 구하기 쉬운 재료만 제안합니다.")
     avoid_str = st.text_input("회피 키워드(쉼표)", value=", ".join(user_rules.get("avoid_keywords", [])))
     allow_str = st.text_input("허용 키워드(쉼표)", value=", ".join(user_rules.get("allow_keywords", [])))
     debug = st.checkbox("디버그 정보 표시", value=False)
