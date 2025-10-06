@@ -591,16 +591,14 @@ def main():
     st.set_page_config(page_title="슬롯별 식단 분석 · 다음 식사 제안", page_icon="🥗", layout="centered")
     st.title("🥗 슬롯별 식단 분석 · 다음 식사 제안")
 
-    # ✅ 자정 기준 하루 메모리 초기화 (init_daily_state, next_midnight, KST는 상단 유틸에 정의)
+    # ✅ 자정 기준 하루 메모리 초기화
     init_daily_state()
     remain = (next_midnight() - datetime.now(KST))
     st.caption(f"현재 입력/결과는 **자정까지 자동 보존**됩니다. 남은 시간: 약 {remain.seconds//3600}시간 {remain.seconds%3600//60}분")
-    # ✅ 브라우저 localStorage에서 이전 상태 복원
+
+    # ✅ 새로고침/새 탭 복원: URL에 저장된 상태 로드
     load_state_from_url()
-     # load_state_from_localstorage()
 
-
- 
     # 파일 로딩
     with st.expander("데이터 파일 경로 설정", expanded=False):
         food_path = st.text_input("food_db.csv 경로", value=FOOD_DB_CSV)
@@ -624,17 +622,15 @@ def main():
 
     # 슬롯별 입력 (session_state에 보존)
     with st.container():
-     for slot in SLOTS:
-         val = st.text_area(
-             slot, height=70, placeholder=f"{slot}에 먹은 것 입력",
-             key=f"ta_{slot}",
-             value=st.session_state.inputs.get(slot, "")
-         )
-         st.session_state.inputs[slot] = val  # <- 이 한 줄이면 충분
-
+        for slot in SLOTS:
+            val = st.text_area(
+                slot, height=70, placeholder=f"{slot}에 먹은 것 입력",
+                key=f"ta_{slot}",
+                value=st.session_state.inputs.get(slot, "")
+            )
+            st.session_state.inputs[slot] = val  # 유지
 
     # 옵션/버튼 (session_state에 보존)
-    # 옵션/버튼
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         threshold = st.number_input(
@@ -642,28 +638,19 @@ def main():
             min_value=1, max_value=5,
             value=st.session_state.get("threshold", 1),
             step=1,
-            key="threshold"   # ✅ key만 주고, session_state에 대입하지 않음
+            key="threshold"
         )
     with c2:
         export_flag = st.checkbox(
             "log.csv 저장",
             value=st.session_state.get("export_flag", True),
-            key="export_flag" # ✅ 마찬가지로 대입 금지
+            key="export_flag"
         )
     with c3:
         analyze_clicked = st.button("분석하기", type="primary", key="analyze_btn")
 
-    # c1, c2, c3 = st.columns([1, 1, 1])
-    # with c1:
-    #     st.session_state.threshold = st.number_input(
-    #         "충족 임계(수량합)", min_value=1, max_value=5, value=st.session_state.get("threshold", 1), step=1, key="threshold"
-    #     )
-    # with c2:
-    #     st.session_state.export_flag = st.checkbox(
-    #         "log.csv 저장", value=st.session_state.get("export_flag", True), key="export_flag"
-    #     )
-    # with c3:
-    #     analyze_clicked = st.button("분석하기", type="primary", key="analyze_btn")
+    # ✅ 입력/옵션 변경 직후에도 URL에 상태 저장 → 분석 전 새로고침에도 복원됨
+    save_state_to_url()
 
     # ===== 분석 실행 =====
     if analyze_clicked:
@@ -698,29 +685,26 @@ def main():
                 pd.DataFrame(columns=["timestamp", "date", "time", "slot", "입력항목", "수량", "매칭식품", "등급", "태그"])
             )
 
-            # ✅ 결과를 session_state에 저장 (리런/새로고침에도 유지)
+            # ✅ 결과 보존
             st.session_state.last_items_df = items_df_all
             st.session_state.last_nutri_df = summarize_nutrients(
-                dict(total_counts), df_food, nutrient_desc, threshold=int(st.session_state.threshold)
+                dict(total_counts), df_food, nutrient_desc, threshold=int(st.session_state["threshold"])
             )
             st.session_state.last_recs, st.session_state.last_combo = recommend_next_meal(
                 dict(total_counts), df_food, nutrient_desc,
-                # 필요 시 옵션 활성화:
                 # tag_targets={'단백질': 2, '식이섬유': 2},
                 # prefer_tags=['식이섬유','단백질'],
                 # avoid_tags=['당','탄수화물'],
                 # allowed_grades=('Safe','Caution'),
                 # max_items=4
             )
-            save_state_to_localstorage()
+
+            # ✅ 분석 결과까지 URL에 저장 (리프레시 후에도 그대로 표시)
             save_state_to_url()
 
-
-          
             # ===== log.csv 저장 & 다운로드 =====
-            if st.session_state.export_flag and not logs_all.empty:
+            if st.session_state["export_flag"] and not logs_all.empty:
                 try:
-                    # 기존 파일이 있으면 append, 없으면 생성
                     try:
                         prev = pd.read_csv(LOG_CSV)
                         merged = pd.concat([prev, logs_all], ignore_index=True)
@@ -736,7 +720,6 @@ def main():
             # ===== food_db 업데이트 (미매칭 재료 추가) =====
             df_food_updated = append_unmatched_to_food_db(df_food, all_unmatched)
             try:
-                # 태그리스트를 원래 CSV 포맷으로 되돌리기 (보기용 '태그(영양)'도 동기화)
                 df_export = df_food_updated.copy()
                 df_export["태그리스트"] = df_export["태그리스트"].apply(_parse_taglist_cell)
                 df_export["태그(영양)"] = df_export["태그리스트"].apply(lambda lst: "/".join(lst))
@@ -747,12 +730,10 @@ def main():
             except Exception as ex:
                 st.error(f"food_db 업데이트/다운로드 실패: {ex}")
 
-
         except Exception as e:
             st.error(f"분석 중 오류: {e}")
-         
 
-    # ===== 화면 표시: 분석 버튼을 안 눌러도 마지막 결과 유지해 보여주기 =====
+    # ===== 화면 표시 =====
     st.markdown("### 🍱 슬롯별 매칭 결과")
     if st.session_state.last_items_df is None or st.session_state.last_items_df.empty:
         st.info("매칭된 항목이 없습니다.")
@@ -783,8 +764,6 @@ def main():
             st.caption(f"  추천 식품: {foods_text}")
         if st.session_state.last_combo:
             st.info("간단 조합 제안: " + " / ".join(st.session_state.last_combo[:4]))
-
-
 
 
 
