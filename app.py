@@ -649,7 +649,9 @@ def main():
                 # allowed_grades=('Safe','Caution'),
                 # max_items=4
             )
+            save_state_to_localstorage()
 
+          
             # ===== log.csv 저장 & 다운로드 =====
             if st.session_state.export_flag and not logs_all.empty:
                 try:
@@ -682,6 +684,7 @@ def main():
 
         except Exception as e:
             st.error(f"분석 중 오류: {e}")
+         
 
     # ===== 화면 표시: 분석 버튼을 안 눌러도 마지막 결과 유지해 보여주기 =====
     st.markdown("### 🍱 슬롯별 매칭 결과")
