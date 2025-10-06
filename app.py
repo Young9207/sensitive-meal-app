@@ -400,7 +400,7 @@ with tabs[2]:
         st.info(make_intuitive_summary(scores, thr=1.0))
 
 # ---- 내보내기 ----
-with tabs[3]):
+with tabs[3]:
     st.subheader("CSV 내보내기")
     df_all = ensure_log()
     csv_all = df_all.to_csv(index=False).encode("utf-8")
