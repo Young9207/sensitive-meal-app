@@ -887,6 +887,52 @@ if 'NUTRIENT_SOURCES' not in globals():
         "건강한지방": ["올리브유", "아보카도", "견과류"]
     }
 
+
+if 'BENEFIT_MAP' not in globals():
+    BENEFIT_MAP = {
+        "단백질": "근육·포만감",
+        "식이섬유": "장건강·포만감·혈당완화",
+        "칼슘": "뼈·치아",
+        "비타민D": "뼈·면역",
+        "비타민C": "면역·철흡수",
+        "오메가3": "심혈관·염증완화",
+        "칼륨": "붓기·혈압",
+        "마그네슘": "긴장완화·수면",
+        "비타민E": "항산화·피부",
+        "비타민A": "눈·피부",
+        "비타민B": "에너지대사"
+    }
+
+def _make_intuitive_summary(scores: dict, threshold: float = 1.0) -> str:
+    """Return a one-line, intuitive daily summary from nutrient scores."""
+    filled_benefits = []
+    low_benefits = []
+    # prioritize essentials first for clarity
+    ordered_keys = list(ESSENTIALS) + [k for k in BENEFIT_MAP.keys() if k not in ESSENTIALS]
+    for k in ordered_keys:
+        val = float(scores.get(k, 0) or 0)
+        benefit = BENEFIT_MAP.get(k)
+        if not benefit:
+            continue
+        if val >= threshold:
+            if benefit not in filled_benefits:
+                filled_benefits.append(benefit)
+        else:
+            if benefit not in low_benefits:
+                low_benefits.append(benefit)
+
+    left = " · ".join(filled_benefits[:3]) if filled_benefits else ""
+    right = " · ".join(low_benefits[:3]) if low_benefits else ""
+    if left and right:
+        return f"오늘 한 줄 요약: {left}는 꽤 채워졌고, {right}는 보충이 필요해요."
+    elif left:
+        return f"오늘 한 줄 요약: {left}는 잘 챙겨졌어요."
+    elif right:
+        return f"오늘 한 줄 요약: {right} 보충이 필요해요."
+    else:
+        return "오늘 한 줄 요약: 분석할 항목이 없어요."
+
+
 if 'VIRTUAL_RULES' not in globals():
     VIRTUAL_RULES = {}
 
@@ -1092,6 +1138,13 @@ try:
                     st.warning("부족 태그:\n" + "\n".join(tips_list))
                 else:
                     st.success("핵심 태그 충족! (ESSENTIALS 기준)")
+                # 직관적 한 줄 요약 표시
+                try:
+                    summary_line = _make_intuitive_summary(scores, threshold=1.0)
+                    st.info(summary_line)
+                except Exception:
+                    pass
+
 
                 recent_items = []
                 try:
