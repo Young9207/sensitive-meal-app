@@ -1271,9 +1271,15 @@ try:
 
                 missing = [n for n in ESSENTIALS if scores.get(n, 0) < 1]
                 if missing:
-                    tips_list = [f"- **{_friendly_label(n)}**: {(BENEFIT_MAP.get(_canon_key(n)) or NUTRIENT_TIPS.get(_canon_key(n), ''))}
-   예시: {', '.join(_example_foods_for(n))}" for n in missing]
-                    st.warning("부족 태그:\n" + "\n".join(tips_list))
+                    tips_list = [
+    "- **{}**: {}\n   예시: {}".format(
+        _friendly_label(n),
+        (BENEFIT_MAP.get(_canon_key(n)) or NUTRIENT_TIPS.get(_canon_key(n), '')),
+        ", ".join(_example_foods_for(n))
+    )
+    for n in missing
+]
+st.warning("부족 태그:\n" + "\n".join(tips_list))
                 else:
                     st.success("핵심 태그 충족! (ESSENTIALS 기준)")
 
