@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -6,7 +5,7 @@ diet_analyzer.py
 입력(아침/오전 간식/점심/오후 간식/저녁) → 식품 매칭 → 영양 분석 → 다음 식사 제안 → log.csv 저장
 + 매칭 안된 재료는 food_db에 신규 식품 행으로 추가하여 food_db_updated.csv 생성
 
-- 필요 파일: food_db.csv (식품, 등급, 태그(영양)), nutrient_dict.csv(영양소, 한줄설명 ...)
+- 필요 파일: food_db.csv (식품, 등급, 태그(영양), 태그리스트), nutrient_dict.csv(영양소, 한줄설명 ...)
 - 실행: streamlit run diet_analyzer.py
 - 파싱 규칙:
   * 쉼표(,) / 줄바꿈으로 1차 분리 → 각 토큰을 '+' 로 2차 분리
@@ -15,8 +14,10 @@ diet_analyzer.py
 
 import re
 import sys
+import ast
+import json
 from collections import defaultdict
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 from datetime import datetime, date
 
 import pandas as pd
@@ -37,19 +38,74 @@ SLOTS = ["아침", "오전 간식", "점심", "오후 간식", "저녁"]
 
 
 # ==================== 유틸/전처리 ====================
-def _parse_tags(cell) -> List[str]:
+def _parse_tags_from_slash(cell) -> List[str]:
     if pd.isna(cell):
         return []
     return [t.strip() for t in str(cell).split('/') if t.strip()]
 
 
+def _parse_taglist_cell(cell: Any) -> List[str]:
+    """
+    태그리스트 셀을 '항상 리스트'로 변환.
+    허용 포맷:
+      - 파이썬 리스트 문자열: "['단백질', '저지방']"
+      - JSON 배열 문자열: '["단백질","저지방"]'
+      - 슬래시 구분: "단백질/저지방"
+      - 실제 리스트: ['단백질', '저지방']
+      - 빈 값/[] → []
+    """
+    if isinstance(cell, list):
+        return [str(x).strip() for x in cell if str(x).strip()]
+    s = "" if cell is None or (isinstance(cell, float) and pd.isna(cell)) else str(cell).strip()
+    if not s or s == "[]":
+        return []
+    # 1) literal_eval 시도 (파이썬 리스트 표기)
+    try:
+        v = ast.literal_eval(s)
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+    except Exception:
+        pass
+    # 2) JSON 파싱 시도
+    try:
+        v = json.loads(s)
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+    except Exception:
+        pass
+    # 3) 슬래시/쉼표 구분 문자열로 처리
+    #    (따옴표/대괄호 흔적 제거)
+    s2 = s.strip().strip("[]")
+    parts = [p.strip().strip("'").strip('"') for p in re.split(r"[,/]", s2) if p.strip()]
+    return [p for p in parts if p]
+
+
+def _ensure_taglist(lst_from_row: Any, fallback_slash: Any) -> List[str]:
+    """
+    우선 태그리스트 파싱 → 비어있으면 태그(영양) 슬래시 분리로 대체
+    """
+    tags = _parse_taglist_cell(lst_from_row)
+    if not tags:
+        tags = _parse_tags_from_slash(fallback_slash)
+    return tags
+
+
 def load_food_db_simple(path: str = FOOD_DB_CSV) -> pd.DataFrame:
     df = pd.read_csv(path)
-    if "태그리스트" not in df.columns:
-        df["태그리스트"] = df["태그(영양)"].apply(_parse_tags)
-    for c in ["식품", "등급"]:
+    # 보장 컬럼
+    for c in ["식품", "등급", "태그(영양)"]:
         if c not in df.columns:
             df[c] = ""
+    # 태그리스트 정규화
+    if "태그리스트" not in df.columns:
+        df["태그리스트"] = df["태그(영양)"].apply(_parse_tags_from_slash)
+    else:
+        df["태그리스트"] = [
+            _ensure_taglist(row.get("태그리스트", None), row.get("태그(영양)", None))
+            if isinstance(row, dict) else _ensure_taglist(df.loc[i, "태그리스트"], df.loc[i, "태그(영양)"])
+            for i, row in enumerate([{}]*len(df))
+        ]
+    # 최소 컬럼 반환
     return df[["식품", "등급", "태그(영양)", "태그리스트"]]
 
 
@@ -142,7 +198,12 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
         for _, r in matched.iterrows():
             name = _norm(r["식품"])
             grade = _norm(r["등급"]) or "Safe"
-            tags = list(r.get("태그리스트", [])) or _parse_tags(r.get("태그(영양)", ""))
+            tags = r.get("태그리스트", [])
+            # 안전장치: 혹시라도 문자열이면 파싱
+            if not isinstance(tags, list):
+                tags = _parse_taglist_cell(tags)
+            if not tags:
+                tags = _parse_tags_from_slash(r.get("태그(영양)", ""))
 
             agg_grade = _worse_grade(agg_grade, grade)
             matched_names.append(name)
@@ -180,7 +241,7 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
 
 
 def summarize_nutrients(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str], threshold: int = 1) -> pd.DataFrame:
-    all_tags = sorted({t for tlist in df_food["태그리스트"] for t in tlist})
+    all_tags = sorted({t for tlist in df_food["태그리스트"].apply(_parse_taglist_cell) for t in tlist})
     rows = []
     for tag in all_tags:
         cnt = float(nutrient_counts.get(tag, 0))
@@ -196,14 +257,18 @@ def summarize_nutrients(nutrient_counts: Dict[str, float], df_food: pd.DataFrame
 def recommend_next_meal(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str],
                         top_nutrients: int = 2, per_food: int = 4):
     """부족 영양소 중심 추천: Safe 식품 우선 + 간단 조합"""
-    tag_universe = {tt for lst in df_food["태그리스트"] for tt in lst}
+    # 태그 우주 생성 시에도 안정적으로 리스트 파싱
+    tag_universe = {tt for lst in df_food["태그리스트"].apply(_parse_taglist_cell) for tt in lst}
     tag_totals = {t: float(nutrient_counts.get(t, 0)) for t in tag_universe}
     lacking = [t for t, v in sorted(tag_totals.items(), key=lambda x: x[1]) if v < 1.0]
     lacking = lacking[:top_nutrients]
 
     suggestions = []
     for tag in lacking:
-        pool = df_food[(df_food["등급"] == "Safe") & (df_food["태그리스트"].apply(lambda lst: tag in lst))]
+        pool = df_food[
+            (df_food["등급"] == "Safe") &
+            (df_food["태그리스트"].apply(lambda lst: tag in _parse_taglist_cell(lst)))
+        ]
         foods = pool["식품"].dropna().astype(str).head(per_food).tolist()
         suggestions.append({
             "부족영양소": tag,
@@ -354,11 +419,10 @@ def main():
             # ===== food_db 업데이트 (미매칭 재료 추가) =====
             df_food_updated = append_unmatched_to_food_db(df_food, all_unmatched)
             try:
-                # 태그리스트를 원래 CSV 포맷으로 되돌리기
+                # 태그리스트를 원래 CSV 포맷으로 되돌리기 (보기용 '태그(영양)'도 동기화)
                 df_export = df_food_updated.copy()
-                if "태그리스트" in df_export.columns:
-                    df_export["태그(영양)"] = df_export["태그리스트"].apply(lambda lst: "/".join(lst) if isinstance(lst, list) else (lst or ""))
-                    df_export = df_export[["식품","등급","태그(영양)","태그리스트"]]
+                df_export["태그리스트"] = df_export["태그리스트"].apply(_parse_taglist_cell)
+                df_export["태그(영양)"] = df_export["태그리스트"].apply(lambda lst: "/".join(lst))
                 df_export.to_csv(FOOD_DB_UPDATED_CSV, index=False, encoding="utf-8-sig")
                 st.success("미매칭 재료를 포함한 'food_db_updated.csv' 생성 완료")
                 with open(FOOD_DB_UPDATED_CSV, "rb") as f:
