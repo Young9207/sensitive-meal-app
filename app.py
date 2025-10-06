@@ -1,13 +1,14 @@
 
 import streamlit as st
 import pandas as pd
-import json, re, random, time
+import json, re, random, time, os
 from datetime import date, time as dtime, datetime
 
-st.set_page_config(page_title="민감도 식사 로그 • 자유 입력", page_icon="🥣", layout="wide")
+st.set_page_config(page_title="민감도 식사 로그 • 개인 규칙 반영", page_icon="🥣", layout="wide")
 
 FOOD_DB_PATH = "food_db.csv"
 LOG_PATH = "log.csv"
+USER_RULES_PATH = "user_rules.json"
 
 SLOTS = ["오전","오전 간식","점심","오후","오후 간식","저녁"]
 EVENT_TYPES = ["food","supplement","symptom","sleep","stool","note"]
@@ -18,7 +19,7 @@ CORE_NUTRIENTS = ["Protein","LightProtein","ComplexCarb","HealthyFat","Fiber",
 
 ESSENTIALS = ["Protein","ComplexCarb","Fiber","B","C","A","K","Mg","Omega3","K_potassium","HealthyFat","D"]
 
-SUGGEST_MODES = ["기본","저자극(역류/메스꺼움)","저염(붓기/절임 후)","샐러드","죽","외식용"]
+SUGGEST_MODES = ["기본","달다구리(당김)","역류","더부룩","붓기","피곤함","변비"]
 
 SUPP_ALERT_KEYWORDS = {
     "효모": ("Avoid","효모 반응 ↑: 빵/맥주/맥주효모 주의"),
@@ -31,8 +32,8 @@ SUPP_ALERT_KEYWORDS = {
     "corn": ("Caution","옥수수 경계: 폴렌타/콘가공품 주의"),
 }
 
+# ------- Keyword mappings & virtuals --------
 KEYWORD_MAP = {
-    # free-text token -> canonical db name or virtual handling
     "블랙커피": "커피",
     "커피": "커피",
     "녹차": "녹차",
@@ -46,6 +47,9 @@ KEYWORD_MAP = {
     "베간치즈": "__VIRTUAL_VEGAN_CHEESE__",
     "햄": "__VIRTUAL_HAM__",
     "빵": "__VIRTUAL_BREAD__",
+    "현미": "__VIRTUAL_BROWN_RICE__",
+    "현미밥": "__VIRTUAL_BROWN_RICE__",
+    "brown rice": "__VIRTUAL_BROWN_RICE__",
 }
 
 VIRTUAL_RULES = {
@@ -53,8 +57,30 @@ VIRTUAL_RULES = {
     "__VIRTUAL_HAM__": {"grade":"Caution","flags":"가공육/염분","tags":["Protein"]},
     "__VIRTUAL_VEGAN_CHEESE__": {"grade":"Caution","flags":"가공 대체식","tags":["HealthyFat"]},
     "__VIRTUAL_COCONUT_KEFIR__": {"grade":"Caution","flags":"발효(프로바이오틱)","tags":["Probiotic"]},
+    "__VIRTUAL_BROWN_RICE__": {"grade":"Avoid","flags":"개인 회피: 현미","tags":["ComplexCarb"]},
 }
 
+# ---------- Persistence for user rules ----------
+def load_user_rules():
+    # defaults: avoid brown rice; allow coffee
+    defaults = {"avoid_keywords": ["현미","현미밥","brown rice"], "allow_keywords": ["커피"]}
+    if os.path.exists(USER_RULES_PATH):
+        try:
+            with open(USER_RULES_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # merge defaults without overwriting user choices
+            for k,v in defaults.items():
+                if k not in data: data[k]=v
+            return data
+        except Exception:
+            return defaults
+    return defaults
+
+def save_user_rules(rules: dict):
+    with open(USER_RULES_PATH, "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+
+# ---------- I/O ----------
 def ensure_log():
     cols = ["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]
     try:
@@ -112,15 +138,12 @@ def add_log_row(log, date_str, t_str, slot, typ, item, qty, food_norm, grade, fl
     log.to_csv(LOG_PATH, index=False)
     return log
 
-# --------- Free-text parser ----------
+# --------- Free-text parsing ---------
 def split_free_text(s: str):
-    # Normalize delimiters: + and commas and parentheses content
     if not s: return []
-    # extract inside parentheses as additional tokens
     extra = []
     for m in re.findall(r"\((.*?)\)", s):
         extra += re.split(r"[,+/ ]+", m)
-    # remove parentheses
     s2 = re.sub(r"\(.*?\)", "", s)
     tokens = re.split(r"[+/,]", s2)
     tokens = [t.strip() for t in tokens if t.strip()]
@@ -128,7 +151,6 @@ def split_free_text(s: str):
     return tokens
 
 def parse_qty(token: str):
-    # pattern: <name><number> or "<name> <number>" ; default 1.0
     m = re.search(r"([0-9]+(\.[0-9]+)?)", token)
     qty = float(m.group(1)) if m else 1.0
     name = re.sub(r"[0-9]+(\.[0-9]+)?", "", token).strip()
@@ -137,52 +159,65 @@ def parse_qty(token: str):
 
 def match_food(name: str, food_db: pd.DataFrame):
     orig = name
-    # keyword map
     if name in KEYWORD_MAP:
         mapped = KEYWORD_MAP[name]
         return mapped, True
-    # try exact match
     recs = food_db[food_db["식품"]==name]
     if not recs.empty:
         return name, True
-    # substring match (both ways)
     candidates = food_db[food_db["식품"].str.contains(name, case=False, na=False)]
     if not candidates.empty:
         return candidates.iloc[0]["식품"], True
     candidates = food_db[food_db["식품"].apply(lambda x: name in str(x))]
     if not candidates.empty:
         return candidates.iloc[0]["식품"], True
-    return orig, False  # unmatched
+    return orig, False
 
-def log_free_foods(log, when_date, when_time, slot, memo, food_db):
+def contains_any(text, keywords):
+    t = str(text)
+    for k in keywords:
+        if k and k in t:
+            return True
+    return False
+
+def log_free_foods(log, when_date, when_time, slot, memo, food_db, user_rules):
     tokens = split_free_text(memo)
     saved = []
     for tok in tokens:
         name_raw, qty = parse_qty(tok)
         name_norm = name_raw.strip()
         if not name_norm: continue
+        # personal avoid override
+        if contains_any(name_norm, user_rules.get("avoid_keywords", [])):
+            log = add_log_row(log, when_date, when_time, slot, "food", name_raw, qty, "", "Avoid", "개인 회피리스트", [""], source="memo(personal_avoid)")
+            saved.append((name_raw, qty))
+            continue
+
         mapped, matched = match_food(name_norm, food_db)
         if matched:
-            # mapped in DB or virtual
             if mapped in VIRTUAL_RULES:
                 vr = VIRTUAL_RULES[mapped]
+                # if this virtual matches allow list (e.g., coffee), downgrade to Safe
                 grade = vr["grade"]; flags = vr["flags"]; tags = vr["tags"]
+                if contains_any(name_norm, user_rules.get("allow_keywords", [])):
+                    grade = "Safe"; flags = "개인 허용"
                 log = add_log_row(log, when_date, when_time, slot, "food", name_raw, qty, name_norm, grade, flags, tags, source="memo")
             else:
                 rec = food_db[food_db["식품"]==mapped].iloc[0]
                 grade = rec.get("등급","Safe")
                 tags = rec.get("태그(영양)",[])
+                # personal allow can override mode-level avoid, but not DB 'Avoid'
+                if contains_any(name_norm, user_rules.get("allow_keywords", [])) and grade!="Avoid":
+                    grade = "Safe"
                 log = add_log_row(log, when_date, when_time, slot, "food", name_raw, qty, mapped, grade, "", tags, source="memo")
         else:
-            # unmatched: still log, with heuristic flags
+            # heuristic
             grade, flags, tags = "", "", []
-            # heuristics
             if "빵" in name_norm: grade, flags = "Avoid", "글루텐/효모 가능성"; tags=["ComplexCarb"]
             if "햄" in name_norm: grade, flags = "Caution", "가공육/염분"; tags=["Protein"]
             if "치즈" in name_norm and ("비건" in name_norm or "베간" in name_norm): grade, flags = "Caution","가공 대체식"; tags=["HealthyFat"]
-            if "커피" in name_norm: mapped="커피"; rec = food_db[food_db["식품"]==mapped]
-            if grade=="" and flags=="":
-                grade = ""
+            if contains_any(name_norm, user_rules.get("allow_keywords", [])): grade="Safe"
+            if contains_any(name_norm, user_rules.get("avoid_keywords", [])): grade="Avoid"; flags="개인 회피리스트"
             log = add_log_row(log, when_date, when_time, slot, "food", name_raw, qty, "", grade, flags, tags, source="memo(unmatched)")
         saved.append((name_raw, qty))
     return log, saved
@@ -199,11 +234,13 @@ def score_day(df_log, df_food, date_str):
             qty = 1.0
         recs = df_food[df_food["식품"]==fn]
         if recs.empty:
-            # try to infer from virtual rules (if any tag matches CORE)
-            if row.get("flags") and row.get("tags"):
-                for t in json.loads(row["tags"]):
-                    if t in score:
-                        score[t] += qty
+            try:
+                tags = json.loads(row.get("tags") or "[]")
+            except Exception:
+                tags = []
+            for t in tags:
+                if t in score:
+                    score[t] += qty
             continue
         tags = recs.iloc[0]["태그(영양)"]
         for t in tags:
@@ -211,7 +248,7 @@ def score_day(df_log, df_food, date_str):
                 score[t] += qty
     return score
 
-# ---------- Suggestion engine (same as before) ----------
+# ---------- Suggestion engine ----------
 def build_baskets(df, include_caution=False):
     pool = df.copy()
     if not include_caution:
@@ -222,30 +259,51 @@ def build_baskets(df, include_caution=False):
     vegs = pool[(pool["식품군"]=="채소") & (pool["태그(영양)"].apply(lambda t: "Fiber" in t))]["식품"].tolist()
     carbs = pool[(pool["태그(영양)"].apply(lambda t: "ComplexCarb" in t))]["식품"].tolist()
     fats = pool[(pool["태그(영양)"].apply(lambda t: "HealthyFat" in t))]["식품"].tolist()
-    return {"protein":proteins, "veg":vegs, "carb":carbs, "fat":fats}
+    fruits = pool[(pool["식품군"]=="과일")]["식품"].tolist()
+    return {"protein":proteins, "veg":vegs, "carb":carbs, "fat":fats, "fruit":fruits}
 
-def mode_filters(mode):
+def mode_filters(mode, user_rules):
     avoid_keywords = []
-    comp = {"protein":1,"veg":2,"carb":1,"fat":1}
-    if mode=="저자극(역류/메스꺼움)":
-        avoid_keywords += ["커피","홍차","초콜릿","오렌지","레몬","라임","붉은 고추","스파이시"]
-    if mode=="저염(붓기/절임 후)":
-        avoid_keywords += ["절임","젓갈","우메보시","김치","햄"]
-    if mode=="샐러드":
-        comp = {"protein":1,"veg":2,"fat":1}
-    if mode=="죽":
-        comp = {"protein":1,"veg":1,"carb":1,"fat":1}
-    if mode=="외식용":
-        avoid_keywords += ["튀김","프라이","크림"]
-    return avoid_keywords, comp
+    comp = {"protein":1,"veg":2,"carb":1,"fat":1,"fruit":0}
+    favor = []
+    if mode=="기본":
+        pass
+    elif mode=="달다구리(당김)":
+        comp = {"protein":1,"veg":1,"carb":0,"fat":1,"fruit":1}
+        avoid_keywords += ["초콜릿","케이크","크림","튀김"]
+        favor += ["C","Fiber","K_potassium","HealthyFat"]
+    elif mode=="역류":
+        avoid_keywords += ["홍차","초콜릿","오렌지","레몬","라임","붉은 고추","스파이시","튀김","크림"]
+        # ☕ 커피는 개인 허용 리스트에 있으면 제외하지 않음
+        if "커피" not in user_rules.get("allow_keywords", []):
+            avoid_keywords += ["커피"]
+        comp = {"protein":1,"veg":2,"carb":1,"fat":1}
+        favor += ["LightProtein","Fiber"]
+    elif mode=="더부룩":
+        avoid_keywords += ["양파","마늘","강낭콩","렌틸","완두","콩","브로콜리","양배추","붉은 양배추"]
+        comp = {"protein":1,"veg":2,"carb":1,"fat":1}
+        favor += ["LightProtein","Fiber"]
+    elif mode=="붓기":
+        avoid_keywords += ["절임","젓갈","우메보시","김치","햄","베이컨","가공","스톡","간장"]
+        comp = {"protein":1,"veg":2,"carb":1,"fat":1,"fruit":0}
+        favor += ["K_potassium","Fiber","Hydration"]
+    elif mode=="피곤함":
+        avoid_keywords += ["튀김","크림","과음"]
+        comp = {"protein":1,"veg":2,"carb":1,"fat":1}
+        favor += ["B","Fe","Mg","ComplexCarb"]
+    elif mode=="변비":
+        comp = {"protein":1,"veg":2,"carb":1,"fat":1,"fruit":1}
+        avoid_keywords += ["치즈","크림","튀김"]
+        favor += ["Fiber","Hydration","K_potassium","HealthyFat"]
+    # Apply personal avoids to suggestion filtering later
+    return avoid_keywords, comp, favor
 
 def filter_keywords(items, kws):
-    res = []
-    for it in items:
-        if any(k in it for k in kws):
-            continue
-        res.append(it)
-    return res
+    return [it for it in items if not any(k in it for k in kws)]
+
+def filter_personal(items, user_rules):
+    avoid = user_rules.get("avoid_keywords", [])
+    return [it for it in items if not any(k in it for k in avoid)]
 
 def pick_diverse(candidates, recent, need, rng):
     pool = [c for c in candidates if c not in recent]
@@ -258,22 +316,29 @@ def pick_diverse(candidates, recent, need, rng):
     rng.shuffle(repeat_pool)
     return pool + repeat_pool[:left]
 
-def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng):
+def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user_rules):
     baskets = build_baskets(df_food, include_caution=include_caution)
-    avoid_kws, comp = mode_filters(mode)
+    avoid_kws, comp, favor_extra = mode_filters(mode, user_rules)
+    # Apply mode avoid keywords
     for k in list(baskets.keys()):
         baskets[k] = filter_keywords(baskets[k], avoid_kws)
-    def favor(lst, favor_tags):
+    # Apply personal avoid keywords
+    for k in list(baskets.keys()):
+        baskets[k] = filter_personal(baskets[k], user_rules)
+
+    local_favor = list(dict.fromkeys(list(favor_tags) + list(favor_extra)))
+    def favor(lst):
         if not lst: return lst
         scored = []
         for name in lst:
             tags = df_food[df_food["식품"]==name].iloc[0]["태그(영양)"]
-            score = sum(1 for t in favor_tags if t in tags)
+            score = sum(1 for t in local_favor if t in tags)
             scored.append((score, name))
         scored.sort(key=lambda x: (-x[0], rng.random()))
         return [n for _, n in scored]
-    for key in ["protein","veg","carb","fat"]:
-        baskets[key] = favor(baskets[key], favor_tags)
+    for key in baskets.keys():
+        baskets[key] = favor(baskets[key])
+
     meal = []
     for key, need in comp.items():
         chosen = pick_diverse(baskets[key], recent_items, need, rng)
@@ -291,47 +356,44 @@ def supplement_flag(text):
 # ---------- App ----------
 food_db = load_food_db()
 log = ensure_log()
+user_rules = load_user_rules()
 
-st.title("🥣 민감도 식사 로그 • 자유 입력")
+st.title("🥣 민감도 식사 로그 • 개인 회피/허용 반영")
+
+# Sidebar: personal rules editor
+with st.sidebar:
+    st.subheader("개인 규칙")
+    avoid_str = st.text_input("회피 키워드(쉼표 구분)", value=", ".join(user_rules.get("avoid_keywords", [])))
+    allow_str = st.text_input("허용 키워드(쉼표 구분)", value=", ".join(user_rules.get("allow_keywords", [])))
+    if st.button("규칙 저장"):
+        user_rules["avoid_keywords"] = [s.strip() for s in avoid_str.split(",") if s.strip()]
+        user_rules["allow_keywords"] = [s.strip() for s in allow_str.split(",") if s.strip()]
+        save_user_rules(user_rules)
+        st.success("개인 규칙을 저장했어요. (제안/파서에 즉시 반영)")
 
 tab1, tab2, tab3 = st.tabs(["📝 기록","📊 요약/제안","📤 내보내기"])
 
 with tab1:
     st.subheader("오늘 기록")
-    colL, colR = st.columns([2,1])
-    with colL:
-        d = st.date_input("날짜", value=date.today())
-        slot = st.selectbox("슬롯(시간대)", SLOTS, index=2)
-        t = st.time_input("시각", value=dtime(hour=12, minute=0))
-        typ = st.radio("기록 종류", EVENT_TYPES, horizontal=True, index=0)
-        if typ=="food":
-            memo = st.text_area("메모 한 줄로 입력 (예: 빵1, 베간치즈 슬라이스1, 햄1, 블랙커피1, 코코넛 케피어+과일퓨레(사과, 바나나))", height=100)
-            if st.button("➕ 파싱해서 모두 저장", type="primary"):
-                ds = d.strftime("%Y-%m-%d"); ts = t.strftime("%H:%M")
-                log, saved = log_free_foods(log, ds, ts, slot, memo, food_db)
-                st.success(f"{len(saved)}개 항목 저장: " + ", ".join([f"{n}×{q}" for n,q in saved]))
-        else:
-            qty = 1.0
-            text = st.text_area("내용 입력", height=80)
-            if typ=="supplement":
-                g, flags = supplement_flag(text)
-                if g=="Avoid": st.error(flags or "주의 보충제")
-                elif g=="Caution": st.warning(flags or "경계 보충제")
-            if st.button("➕ 저장", type="primary"):
-                ds = d.strftime("%Y-%m-%d"); ts = t.strftime("%H:%M")
-                log = add_log_row(log, ds, ts, slot, typ, text, qty, "", "", "", [], source="manual")
-                st.success("저장되었습니다.")
-        st.markdown("---")
-        st.caption("최근 기록")
-        st.dataframe(log.sort_values(["date","time"]).tail(20), use_container_width=True, height=240)
-    with colR:
-        st.subheader("오늘 경고 요약")
-        ds = d.strftime("%Y-%m-%d")
-        day = log[(log["date"]==ds) & (log["type"]=="food")]
-        avoid_ct = (day["grade"]=="Avoid").sum()
-        caution_ct = (day["grade"]=="Caution").sum()
-        st.write(f"🔴 회피: {int(avoid_ct)}  /  🟡 경계: {int(caution_ct)}")
-        st.caption("자유입력으로 저장된 항목도 등급/키워드에 맞춰 경고 계산에 포함됩니다.")
+    d = st.date_input("날짜", value=date.today())
+    slot = st.selectbox("슬롯(시간대)", SLOTS, index=2)
+    t_input = st.time_input("시각", value=dtime(hour=12, minute=0))
+    typ = st.radio("기록 종류", EVENT_TYPES, horizontal=True, index=0)
+    if typ=="food":
+        memo = st.text_area("메모 한 줄로 입력", height=100, placeholder="예: 빵1, 베간치즈 슬라이스1, 햄1, 블랙커피1, 코코넛 케피어+과일퓨레(사과, 바나나)")
+        if st.button("➕ 파싱해서 모두 저장", type="primary"):
+            ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
+            log, saved = log_free_foods(log, ds, ts, slot, memo, food_db, user_rules)
+            st.success(f"{len(saved)}개 항목 저장: " + ", ".join([f"{n}×{q}" for n,q in saved]))
+    else:
+        text = st.text_area("내용 입력", height=80)
+        if st.button("➕ 저장", type="primary"):
+            ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
+            log = add_log_row(log, ds, ts, slot, typ, text, 1.0, "", "", "", [], source="manual")
+            st.success("저장되었습니다.")
+    st.markdown("---")
+    st.caption("최근 기록")
+    st.dataframe(log.sort_values(['date','time']).tail(20), use_container_width=True, height=240)
 
 with tab2:
     st.subheader("요약 & 다음 끼니 제안(3가지)")
@@ -341,15 +403,8 @@ with tab2:
     score_df = pd.DataFrame([scores]).T.reset_index()
     score_df.columns = ["영양소","점수"]
     st.dataframe(score_df, use_container_width=True, height=260)
+
     favor_tags = [n for n in ESSENTIALS if scores.get(n,0)<1]
-    day = log[log["date"]==date_str]
-    sym_today = (day[day["type"]=="symptom"]["item"].str.cat(sep=" ") if not day[day["type"]=="symptom"].empty else "").lower()
-    symptoms = []
-    for key in ["역류","신물","메스꺼움","복부팽만","붓기","피로"]:
-        if key in sym_today:
-            symptoms.append(key)
-    # 자동 모드 보정: 오늘 Avoid가 있었다면 '저자극' 가중
-    mode = st.selectbox("제안 모드", SUGGEST_MODES, index=0)
     include_caution = st.checkbox("경계(Caution) 포함", value=False)
     diversity_n = st.slider("다양화(최근 N회 중복 회피)", min_value=0, max_value=10, value=5, step=1)
     recent_items = []
@@ -357,12 +412,13 @@ with tab2:
         recent_df = log[log["type"]=="food"].sort_values(["date","time"]).tail(diversity_n*5)
         recent_items = (recent_df["food_norm"].fillna("") + "|" + recent_df["item"].fillna("")).tolist()
         recent_items = [x.split("|")[0] for x in recent_items if x]
-    if (day["grade"]=="Avoid").any() and mode=="기본":
-        mode = "저자극(역류/메스꺼움)"
+
+    mode = st.selectbox("제안 모드", SUGGEST_MODES, index=0)
     rng = random.Random(int(time.time()) % 10**9)
+
     cols = st.columns(3)
     for idx in range(3):
-        meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, rng)
+        meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, rng, user_rules)
         with cols[idx]:
             st.markdown(f"**제안 {idx+1} — {mode}**")
             if meal:
@@ -377,7 +433,7 @@ with tab2:
                             add_log_row(log, date_str, now, "점심", "food", token, 1.0, token, rec.get("등급","Safe"), "", rec.get("태그(영양)",[]), source="suggested")
                     st.success("저장 완료! 기록 탭에서 확인하세요.")
             else:
-                st.info("조건을 만족하는 식품 풀이 부족합니다. FoodDB를 보강해주세요.")
+                st.info("조건을 만족하는 식품 풀이 부족합니다. 개인 회피리스트 또는 FoodDB를 확인하세요.")
 
 with tab3:
     st.subheader("내보내기/백업")
@@ -385,4 +441,7 @@ with tab3:
         st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
     with open(FOOD_DB_PATH, "rb") as f:
         st.download_button("⬇️ food_db.csv 다운로드", data=f, file_name="food_db.csv", mime="text/csv")
-    st.caption("구글 드라이브 자동연동은 보안상 비권장. 폴더 링크를 기억해두고 수동 업로드가 가장 간단/안전합니다.")
+    if os.path.exists(USER_RULES_PATH):
+        with open(USER_RULES_PATH, "rb") as f:
+            st.download_button("⬇️ user_rules.json 다운로드", data=f, file_name="user_rules.json", mime="application/json")
+    st.caption("사이드바에서 개인 회피/허용 키워드를 관리하세요. 예) 회피: 현미, 현미밥 / 허용: 커피")
