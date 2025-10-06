@@ -1093,11 +1093,11 @@ def _per_meal_breakdown(df_food, df_today):
         if matched:
             try:
                 rec = df_food[df_food["식품"] == mapped].iloc[0]
-                tags = list(rec.get("태그(영양)", [])) or []
+                tags = _parse_tags_flexible(rec.get("태그(영양)", []))
             except Exception:
                 tags = []
         for t in tags:
-            b = BENEFIT_MAP.get(t) or NUTRIENT_TIPS.get(t) or ""
+            b = _benefit_from_tag(t)
             if b and b not in benefits:
                 benefits.append(b)
         rows.append({
@@ -1106,7 +1106,7 @@ def _per_meal_breakdown(df_food, df_today):
             "입력항목": raw,
             "매칭식품": mapped if matched else raw,
             "채워진태그": ", ".join(tags[:5]),
-            "직관설명": " · ".join(benefits[:3])
+            "직관설명": (" · ".join([x for x in benefits if x][:3]) or "균형 잡힌 선택")
         })
     df_out = pd.DataFrame(rows)
     if not df_out.empty:
@@ -1378,6 +1378,49 @@ def today_df():
         except Exception:
             return _pd.DataFrame()
 
+
+def _parse_tags_flexible(v):
+    """
+    태그(영양) 컬럼이 list 또는 문자열("단백질, 식이섬유") 등 다양한 형태로 올 수 있어
+    안전하게 list[str]로 변환합니다.
+    """
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    s = str(v)
+    # 콤마/슬래시/공백 구분자를 모두 허용
+    parts = re.split(r"[,\u3001/;|]+|\s{2,}", s)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # 괄호나 해시 제거
+        p = re.sub(r"[#\[\]\(\)]+", "", p).strip()
+        if p:
+            out.append(p)
+    return out
+
+def _benefit_from_tag(tag):
+    """
+    단일 태그에서 베네핏 한줄을 생성.
+    1) BENEFIT_MAP → 2) NUTRIENT_TIPS → 3) 동의어 매핑(_nut_ko/_nut_en) → 4) 기본 문구
+    """
+    if 'BENEFIT_MAP' in globals() and tag in BENEFIT_MAP and BENEFIT_MAP.get(tag):
+        return BENEFIT_MAP.get(tag)
+    if 'NUTRIENT_TIPS' in globals() and tag in NUTRIENT_TIPS and NUTRIENT_TIPS.get(tag):
+        return NUTRIENT_TIPS.get(tag)
+    # 동의어 시도
+    try:
+        for alt in {tag, _nut_ko(tag), _nut_en(tag)}:
+            if alt and 'BENEFIT_MAP' in globals() and BENEFIT_MAP.get(alt):
+                return BENEFIT_MAP[alt]
+            if alt and 'NUTRIENT_TIPS' in globals() and NUTRIENT_TIPS.get(alt):
+                return NUTRIENT_TIPS[alt]
+    except Exception:
+        pass
+    return ""
 def _to_tags(text):
     """
     app.py 호환: 자유 텍스트에서 간단한 태그 추출.
