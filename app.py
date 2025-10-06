@@ -20,7 +20,7 @@ FOOD_DB_PATH = "food_db.csv"
 LOG_PATH = "log.csv"
 USER_RULES_PATH = "user_rules.json"
 
-SLOTS = ["오전","오전 간식","점심","오후","오후 간식","저녁"]
+SLOTS = ["오전","오전 간식","점심","오후 간식","저녁"]
 EVENT_TYPES = ["food","supplement","symptom"]  # 단순화
 
 CORE_NUTRIENTS = ["Protein","LightProtein","ComplexCarb","HealthyFat","Fiber",
@@ -263,7 +263,7 @@ def score_day(df_log, df_food, date_str):
         fn = row.get("food_norm") or row.get("item")
         try: qty = float(row.get("qty") or 1.0)
         except Exception: qty = 1.0
-        recs = df_food[df_food["식품"]==fn]
+        recs = df_food[df_food["식품"].astype(str).str.contains(str(fn), case=False, na=False)]
         if recs.empty:
             tags_val = row.get("tags")
             tags = safe_json_loads(tags_val)
@@ -457,7 +457,7 @@ def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user
         if not lst: return lst
         scored = []
         for name in lst:
-            recs = df_food[df_food["식품"]==name]
+            recs = df_food[df_food["식품"].astype(str).str.contains(str(name), case=False, na=False)]
             tags = recs.iloc[0]["태그(영양)"] if not recs.empty else []
             score = sum(1 for t in local_favor if t in tags)
             scored.append((score, name))
@@ -953,7 +953,7 @@ def _score_tokens(free_text, df_food, user_rules):
                 if _contains_any(name_norm, user_rules.get("allow_keywords", [])):
                     grade, flags = "Safe", "개인 허용"
             else:
-                rec = df_food[df_food["식품"] == mapped].iloc[0]
+                rec = df_food[df_food["식품"].astype(str).str.contains(str(mapped), case=False, na=False)].head(1).iloc[0]
                 grade = rec.get("등급", "Safe")
                 tags = rec.get("태그(영양)", [])
                 if _contains_any(name_norm, user_rules.get("allow_keywords", [])) and grade != "Avoid":
@@ -1050,7 +1050,7 @@ def _per_meal_breakdown(df_food, df_today):
         tags, benefits = [], []
         if matched:
             try:
-                rec = df_food[df_food["식품"] == mapped].iloc[0]
+                rec = df_food[df_food["식품"].astype(str).str.contains(str(mapped), case=False, na=False)].head(1).iloc[0]
                 tags = list(rec.get("태그(영양)", [])) or []
             except Exception:
                 tags = []
@@ -1259,7 +1259,3 @@ try:
                 st.error(f"분석 실패: {e}")
 except Exception:
     pass
-
-# ==== [END ADDON] =============================================================
-
-# ==== [END ADDON] =============================================================
