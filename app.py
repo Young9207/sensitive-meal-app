@@ -572,6 +572,48 @@ with tab1:
 
 with tab2:
     st.subheader("요약 & 다음 끼니 제안(3가지)")
+
+    # === 영양 설명/보강 제안 ===
+    with st.expander("영양 설명과 보강 아이디어 보기", expanded=False):
+        try:
+            low_keys = [k for k, v in sorted(scores.items(), key=lambda x: x[1]) if v < 1.0]
+            if not low_keys:
+                st.markdown("- 오늘은 핵심 영양소 커버가 전반적으로 **양호**합니다.")
+            else:
+                st.markdown("부족/미달 영양소와 간단 설명:")
+                rows = []
+                for k in low_keys:
+                    tip = NUTRIENT_TIPS.get(k, NUTRIENT_TIPS.get(_nut_ko(k), "")) if 'NUTRIENT_TIPS' in globals() else ""
+                    rows.append(f"- **{k}**: {tip}")
+                st.markdown("\\n".join(rows))
+
+                # 예시 식품 추천 (food_db의 태그 기반)
+                try:
+                    eg_lines = []
+                    # 태그에 k 또는 해당 한글명이 포함된 식품 예시 추출
+                    for k in low_keys[:5]:
+                        tag_candidates = {k, _nut_ko(k), _nut_en(k)}
+                        cand = []
+                        for _, r in food_db.iterrows():
+                            tags = r.get("태그(영양)", [])
+                            if not isinstance(tags, list):
+                                continue
+                            tset = set(map(str, tags))
+                            if tset & tag_candidates:
+                                cand.append(str(r.get("식품")))
+                            if len(cand) >= 6:
+                                break
+                        if cand:
+                            eg_lines.append(f"  • **{k}** 예시: " + ", ".join(sorted(set(cand))[:6]))
+                    if eg_lines:
+                        st.markdown("보강에 도움이 되는 식품 예시:")
+                        st.markdown("\\n".join(eg_lines))
+                except Exception as _e:
+                    pass
+        except Exception as e:
+            st.info("설명 생성 중 문제가 있었습니다.")
+            if debug: st.exception(e)
+
     dsum = st.date_input("기준 날짜", value=date.today(), key="sumdate_2")
     date_str = dsum.strftime("%Y-%m-%d")
     try:
