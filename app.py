@@ -523,27 +523,46 @@ def main():
 
     # 슬롯별 입력 (session_state에 보존)
     with st.container():
-        for slot in SLOTS:
-            st.session_state.inputs[slot] = st.text_area(
-                slot,
-                height=70,
-                placeholder=f"{slot}에 먹은 것 입력",
-                key=f"ta_{slot}",
-                value=st.session_state.inputs.get(slot, "")
-            )
+     for slot in SLOTS:
+         val = st.text_area(
+             slot, height=70, placeholder=f"{slot}에 먹은 것 입력",
+             key=f"ta_{slot}",
+             value=st.session_state.inputs.get(slot, "")
+         )
+         st.session_state.inputs[slot] = val  # <- 이 한 줄이면 충분
+
 
     # 옵션/버튼 (session_state에 보존)
+    # 옵션/버튼
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        st.session_state.threshold = st.number_input(
-            "충족 임계(수량합)", min_value=1, max_value=5, value=st.session_state.get("threshold", 1), step=1, key="threshold"
+        threshold = st.number_input(
+            "충족 임계(수량합)",
+            min_value=1, max_value=5,
+            value=st.session_state.get("threshold", 1),
+            step=1,
+            key="threshold"   # ✅ key만 주고, session_state에 대입하지 않음
         )
     with c2:
-        st.session_state.export_flag = st.checkbox(
-            "log.csv 저장", value=st.session_state.get("export_flag", True), key="export_flag"
+        export_flag = st.checkbox(
+            "log.csv 저장",
+            value=st.session_state.get("export_flag", True),
+            key="export_flag" # ✅ 마찬가지로 대입 금지
         )
     with c3:
         analyze_clicked = st.button("분석하기", type="primary", key="analyze_btn")
+
+    # c1, c2, c3 = st.columns([1, 1, 1])
+    # with c1:
+    #     st.session_state.threshold = st.number_input(
+    #         "충족 임계(수량합)", min_value=1, max_value=5, value=st.session_state.get("threshold", 1), step=1, key="threshold"
+    #     )
+    # with c2:
+    #     st.session_state.export_flag = st.checkbox(
+    #         "log.csv 저장", value=st.session_state.get("export_flag", True), key="export_flag"
+    #     )
+    # with c3:
+    #     analyze_clicked = st.button("분석하기", type="primary", key="analyze_btn")
 
     # ===== 분석 실행 =====
     if analyze_clicked:
@@ -657,6 +676,7 @@ def main():
             st.caption(f"  추천 식품: {foods_text}")
         if st.session_state.last_combo:
             st.info("간단 조합 제안: " + " / ".join(st.session_state.last_combo[:4]))
+
 
 
 
