@@ -523,6 +523,67 @@ def append_unmatched_to_food_db(df_food: pd.DataFrame, unmatched_names: List[str
         df_new = df_food.copy()
     return df_new
 
+import json, base64, zlib
+import pandas as pd
+import streamlit as st
+
+def _b64_encode(obj: dict) -> str:
+    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    comp = zlib.compress(raw, level=9)
+    return base64.urlsafe_b64encode(comp).decode("ascii")
+
+def _b64_decode(s: str) -> dict | None:
+    try:
+        comp = base64.urlsafe_b64decode(s.encode("ascii"))
+        raw = zlib.decompress(comp)
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+def save_state_to_url():
+    """현재 입력/결과를 URL 쿼리파라미터(state=...)로 저장."""
+    data = {
+        "inputs": st.session_state.get("inputs", {}),
+        "threshold": st.session_state.get("threshold", 1),
+        "export_flag": st.session_state.get("export_flag", True),
+        "last_items_df": (
+            st.session_state.last_items_df.to_dict(orient="split")
+            if st.session_state.get("last_items_df", None) is not None else None
+        ),
+        "last_nutri_df": (
+            st.session_state.last_nutri_df.to_dict(orient="split")
+            if st.session_state.get("last_nutri_df", None) is not None else None
+        ),
+        "last_recs": st.session_state.get("last_recs", []),
+        "last_combo": st.session_state.get("last_combo", []),
+        "daily_date": st.session_state.get("daily_date", None),
+    }
+    state_b64 = _b64_encode(data)
+    st.experimental_set_query_params(state=state_b64)
+
+def load_state_from_url():
+    """URL 쿼리파라미터(state)에서 상태 복원."""
+    params = st.experimental_get_query_params()
+    if "state" not in params:
+        return
+    decoded = _b64_decode(params["state"][0])
+    if not decoded:
+        return
+    # 날짜가 바뀌었으면 복원하지 않고 초기화
+    if decoded.get("daily_date") and decoded["daily_date"] != st.session_state.get("daily_date"):
+        return
+
+    st.session_state.inputs = decoded.get("inputs", {})
+    st.session_state["threshold"] = decoded.get("threshold", 1)
+    st.session_state["export_flag"] = decoded.get("export_flag", True)
+
+    li = decoded.get("last_items_df")
+    ln = decoded.get("last_nutri_df")
+    st.session_state.last_items_df = pd.DataFrame(**li) if li else None
+    st.session_state.last_nutri_df = pd.DataFrame(**ln) if ln else None
+    st.session_state.last_recs = decoded.get("last_recs", [])
+    st.session_state.last_combo = decoded.get("last_combo", [])
+
 
 # ==================== Streamlit UI ====================
 def main():
@@ -535,7 +596,9 @@ def main():
     remain = (next_midnight() - datetime.now(KST))
     st.caption(f"현재 입력/결과는 **자정까지 자동 보존**됩니다. 남은 시간: 약 {remain.seconds//3600}시간 {remain.seconds%3600//60}분")
     # ✅ 브라우저 localStorage에서 이전 상태 복원
-    load_state_from_localstorage()
+    load_state_from_url()
+     # load_state_from_localstorage()
+
 
  
     # 파일 로딩
@@ -650,6 +713,8 @@ def main():
                 # max_items=4
             )
             save_state_to_localstorage()
+            save_state_to_url()
+
 
           
             # ===== log.csv 저장 & 다운로드 =====
@@ -681,6 +746,7 @@ def main():
                     st.download_button("⬇️ food_db_updated.csv 다운로드", data=f.read(), file_name="food_db_updated.csv", mime="text/csv")
             except Exception as ex:
                 st.error(f"food_db 업데이트/다운로드 실패: {ex}")
+
 
         except Exception as e:
             st.error(f"분석 중 오류: {e}")
