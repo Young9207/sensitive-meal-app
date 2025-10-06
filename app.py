@@ -475,7 +475,7 @@ def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user
         baskets[key] = apply_availability_filter(merged, key, allow_rare=allow_rare)
     meal = []
     for key, need in comp.items():
-        chosen = pick_diverse(baskets[key], recent_items, need, random)
+        chosen = pick_diverse(baskets[key], recent_items, need, rng)
         meal += chosen
     title = build_meal_title(mode, meal)
     explain = mode_note
@@ -609,7 +609,16 @@ with tab2:
     cols = st.columns(3)
     for idx in range(3):
         try:
-            title, meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, random, load_user_rules())
+            title, meal, explain = gen_meal(
+                food_db,
+                include_caution,
+                mode,
+                recent_items,
+                favor_tags,
+                rng,
+                user_rules,
+                allow_rare=allow_rare
+            )
             with cols[idx]:
                 st.markdown(f"**{title}**")
                 if meal:
@@ -645,7 +654,14 @@ with tab3:
                     file_name="log.csv",
                     mime="text/csv"
                 )
-
+        if os.path.exists(FOOD_DB_PATH):
+            with open(FOOD_DB_PATH, "rb") as f:
+                st.download_button(
+                    "⬇️ food_db.csv 다운로드",
+                    data=f.read(),
+                    file_name="food_db.csv",
+                    mime="text/csv"
+                )
         if os.path.exists(USER_RULES_PATH):
             with open(USER_RULES_PATH, "rb") as f:
                 st.download_button(
@@ -750,10 +766,6 @@ with tab4:
             if debug: st.exception(e)
     else:
         st.info("아직 로그가 없습니다.")
-            st.success("FoodDB 저장됨."); _force_rerun()
-        except Exception as e:
-            st.error("FoodDB 저장 중 오류")
-            if debug: st.exception(e)
 
     st.markdown("---")
     # --- user_rules 가져오기 ---
