@@ -12,13 +12,19 @@ diet_analyzer.py
   * 토큰 끝 숫자는 수량으로 해석 (예: '우메보시2' → 이름='우메보시', 수량=2.0) 없으면 1.0
 """
 
+from __future__ import annotations
+
 import re
 import sys
 import ast
 import json
+import base64
+import zlib
 from collections import defaultdict
 from typing import List, Dict, Tuple, Any
-from datetime import datetime, date
+
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -37,20 +43,47 @@ FOOD_DB_UPDATED_CSV = "food_db_updated.csv"
 SLOTS = ["아침", "오전 간식", "점심", "오후 간식", "저녁"]
 
 
+# ==================== 타임존/하루 상태 ====================
+TZ = ZoneInfo("Europe/Paris")
+
+def today_str() -> str:
+    return datetime.now(TZ).date().isoformat()
+
+def next_midnight():
+    now = datetime.now(TZ)
+    nm = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=TZ)
+    return nm
+
+def init_daily_state():
+    """자정 단위로 state를 유지. 날짜 바뀌면 자동 초기화."""
+    if "daily_date" not in st.session_state:
+        st.session_state.daily_date = today_str()
+    if st.session_state.daily_date != today_str():
+        for k in ["inputs", "last_items_df", "last_nutri_df", "last_recs", "last_combo"]:
+            st.session_state.pop(k, None)
+        st.session_state.daily_date = today_str()
+    # 입력/결과 컨테이너 준비
+    st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
+    st.session_state.setdefault("last_items_df", None)
+    st.session_state.setdefault("last_nutri_df", None)
+    st.session_state.setdefault("last_recs", [])
+    st.session_state.setdefault("last_combo", [])
+    st.session_state.setdefault("threshold", 1)
+    st.session_state.setdefault("export_flag", True)
+
+
 # ==================== 유틸/전처리 ====================
 def _parse_tags_from_slash(cell) -> List[str]:
     if pd.isna(cell):
         return []
     return [t.strip() for t in str(cell).split('/') if t.strip()]
 
-
 def _parse_taglist_cell(cell: Any) -> List[str]:
     """
     태그리스트 셀을 '항상 리스트'로 변환.
-    허용 포맷:
       - 파이썬 리스트 문자열: "['단백질', '저지방']"
       - JSON 배열 문자열: '["단백질","저지방"]'
-      - 슬래시 구분: "단백질/저지방"
+      - 슬래시/쉼표 구분: "단백질/저지방" 또는 "단백질, 저지방"
       - 실제 리스트: ['단백질', '저지방']
       - 빈 값/[] → []
     """
@@ -59,54 +92,35 @@ def _parse_taglist_cell(cell: Any) -> List[str]:
     s = "" if cell is None or (isinstance(cell, float) and pd.isna(cell)) else str(cell).strip()
     if not s or s == "[]":
         return []
-    # 1) literal_eval 시도 (파이썬 리스트 표기)
+    # 1) literal_eval
     try:
         v = ast.literal_eval(s)
         if isinstance(v, list):
             return [str(x).strip() for x in v if str(x).strip()]
     except Exception:
         pass
-    # 2) JSON 파싱 시도
+    # 2) JSON
     try:
         v = json.loads(s)
         if isinstance(v, list):
             return [str(x).strip() for x in v if str(x).strip()]
     except Exception:
         pass
-    # 3) 슬래시/쉼표 구분 문자열로 처리
-    #    (따옴표/대괄호 흔적 제거)
+    # 3) 구분자 기반
     s2 = s.strip().strip("[]")
     parts = [p.strip().strip("'").strip('"') for p in re.split(r"[,/]", s2) if p.strip()]
     return [p for p in parts if p]
 
-
-def _ensure_taglist(lst_from_row: Any, fallback_slash: Any) -> List[str]:
-    """
-    우선 태그리스트 파싱 → 비어있으면 태그(영양) 슬래시 분리로 대체
-    """
-    tags = _parse_taglist_cell(lst_from_row)
-    if not tags:
-        tags = _parse_tags_from_slash(fallback_slash)
-    return tags
-
-
 def load_food_db_simple(path: str = FOOD_DB_CSV) -> pd.DataFrame:
     df = pd.read_csv(path)
-
-    # 필수 컬럼 보장
     for c in ["식품", "등급", "태그(영양)"]:
         if c not in df.columns:
             df[c] = ""
-
-    # 태그리스트 정규화 (있든 없든 항상 리스트로)
     if "태그리스트" in df.columns:
         df["태그리스트"] = df["태그리스트"].apply(_parse_taglist_cell)
     else:
         df["태그리스트"] = df["태그(영양)"].apply(_parse_tags_from_slash)
-
     return df[["식품", "등급", "태그(영양)", "태그리스트"]]
-
-
 
 def load_nutrient_dict_simple(path: str = NUTRIENT_DICT_CSV) -> Dict[str, str]:
     nd = pd.read_csv(path)
@@ -115,51 +129,12 @@ def load_nutrient_dict_simple(path: str = NUTRIENT_DICT_CSV) -> Dict[str, str]:
             nd[c] = ""
     return {str(r["영양소"]).strip(): str(r["한줄설명"]).strip() for _, r in nd.iterrows()}
 
-
 _GRADE_ORDER = {"Avoid": 2, "Caution": 1, "Safe": 0}
-
-
 def _worse_grade(g1: str, g2: str) -> str:
     return g1 if _GRADE_ORDER.get(g1, 0) >= _GRADE_ORDER.get(g2, 0) else g2
-
-
 def _norm(s: str) -> str:
     return str(s or "").strip()
 
-#=================time
-from datetime import datetime, date, timedelta, timezone
-
-KST = timezone(timedelta(hours=9))  # 타임존 쓰시면 맞춰서
-def today_str():
-    return datetime.now(KST).date().isoformat()
-
-def next_midnight():
-    now = datetime.now(KST)
-    nm = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return nm
-
-def init_daily_state():
-    """자정 단위로 state를 유지. 날짜 바뀌면 자동 초기화."""
-    # 날짜 키
-    if "daily_date" not in st.session_state:
-        st.session_state.daily_date = today_str()
-
-    # 날짜가 바뀌었으면 초기화
-    if st.session_state.daily_date != today_str():
-        # 초기화할 키들
-        for k in ["inputs", "last_items_df", "last_nutri_df", "last_recs", "last_combo"]:
-            st.session_state.pop(k, None)
-        st.session_state.daily_date = today_str()
-
-    # 슬롯 입력 저장소
-    if "inputs" not in st.session_state:
-        st.session_state.inputs = {s: "" for s in SLOTS}
-
-    # 결과 저장소
-    st.session_state.setdefault("last_items_df", None)
-    st.session_state.setdefault("last_nutri_df", None)
-    st.session_state.setdefault("last_recs", [])
-    st.session_state.setdefault("last_combo", [])
 
 # ==================== 파서 (콤마/플러스/수량) ====================
 def split_items(text: str) -> List[str]:
@@ -171,7 +146,6 @@ def split_items(text: str) -> List[str]:
     for part in first:
         final += [q.strip() for q in part.split('+') if q.strip()]
     return final
-
 
 def parse_qty(token: str) -> Tuple[str, float]:
     """토큰 끝의 숫자를 수량으로 파싱. 없으면 1.0"""
@@ -188,47 +162,9 @@ def match_item_to_foods(item: str, df_food: pd.DataFrame) -> pd.DataFrame:
     """item(예: '소고기 미역국')에 대해 food_db의 식품명이 포함되면 매칭.
        반대방향(항목명이 더 짧고 DB가 길 때)도 허용."""
     it = _norm(item)
-    hits = df_food[
-        df_food["식품"].apply(lambda x: _norm(x) in it or it in _norm(x))
-    ].copy()
+    hits = df_food[df_food["식품"].apply(lambda x: _norm(x) in it or it in _norm(x))].copy()
     hits = hits[hits["식품"].apply(lambda x: len(_norm(x)) >= 1)]
     return hits
-
-from streamlit_javascript import st_javascript
-import json
-
-def save_state_to_localstorage():
-    """현재 st.session_state.inputs, last_items_df 등 localStorage에 저장"""
-    data = {
-        "inputs": st.session_state.get("inputs", {}),
-        "last_items_df": st.session_state.get("last_items_df", pd.DataFrame()).to_dict() if st.session_state.get("last_items_df") is not None else None,
-        "last_nutri_df": st.session_state.get("last_nutri_df", pd.DataFrame()).to_dict() if st.session_state.get("last_nutri_df") is not None else None,
-        "last_recs": st.session_state.get("last_recs", []),
-        "last_combo": st.session_state.get("last_combo", []),
-    }
-    js = f"""
-    localStorage.setItem('diet_state', JSON.stringify({json.dumps(data)}));
-    """
-    st_javascript(js)
-
-
-def load_state_from_localstorage():
-    """localStorage에 저장된 state 복원"""
-    js = "localStorage.getItem('diet_state');"
-    raw = st_javascript(js)
-    if raw:
-        try:
-            data = json.loads(raw)
-            st.session_state.inputs = data.get("inputs", {})
-            if "last_items_df" in data and data["last_items_df"]:
-                st.session_state.last_items_df = pd.DataFrame(data["last_items_df"])
-            if "last_nutri_df" in data and data["last_nutri_df"]:
-                st.session_state.last_nutri_df = pd.DataFrame(data["last_nutri_df"])
-            st.session_state.last_recs = data.get("last_recs", [])
-            st.session_state.last_combo = data.get("last_combo", [])
-        except Exception as e:
-            st.warning(f"상태 복원 실패: {e}")
-
 
 def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nutrient_desc: Dict[str, str]):
     """슬롯 단위 분석 → (items_df, nutrient_counts(dict), log_df, unmatched_names(list))"""
@@ -244,17 +180,14 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
         if not raw:
             continue
         matched = match_item_to_foods(raw, df_food)
-        timestamp = datetime.now().isoformat(timespec="seconds")
+        timestamp = datetime.now(TZ).isoformat(timespec="seconds")
         if matched.empty:
-            per_item_rows.append({
-                "슬롯": slot, "입력항목": raw, "수량": qty, "매칭식품": "", "등급": "", "태그": ""
-            })
+            per_item_rows.append({"슬롯": slot, "입력항목": raw, "수량": qty, "매칭식품": "", "등급": "", "태그": ""})
             log_rows.append({
                 "timestamp": timestamp,
-                "date": date.today().isoformat(),
+                "date": datetime.now(TZ).date().isoformat(),
                 "time": timestamp.split("T")[1],
-                "slot": slot,
-                "입력항목": raw, "수량": qty, "매칭식품": "", "등급": "", "태그": ""
+                "slot": slot, "입력항목": raw, "수량": qty, "매칭식품": "", "등급": "", "태그": ""
             })
             unmatched_names.append(_norm(raw))
             continue
@@ -267,7 +200,6 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
             name = _norm(r["식품"])
             grade = _norm(r["등급"]) or "Safe"
             tags = r.get("태그리스트", [])
-            # 안전장치: 혹시라도 문자열이면 파싱
             if not isinstance(tags, list):
                 tags = _parse_taglist_cell(tags)
             if not tags:
@@ -278,7 +210,7 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
             for t in tags:
                 if t:
                     tag_union.append(t)
-                    nutrient_counts[t] += float(qty or 1.0)  # 수량 반영
+                    nutrient_counts[t] += float(qty or 1.0)
 
         per_item_rows.append({
             "슬롯": slot,
@@ -286,43 +218,29 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame, nu
             "수량": qty,
             "매칭식품": ", ".join(dict.fromkeys(matched_names)),
             "등급": agg_grade,
-            "태그": ", ".join(dict.fromkeys(tag_union))
+            "태그": ", ".join(dict.fromkeys(tag_union)),
         })
         log_rows.append({
             "timestamp": timestamp,
-            "date": date.today().isoformat(),
+            "date": datetime.now(TZ).date().isoformat(),
             "time": timestamp.split("T")[1],
             "slot": slot,
             "입력항목": raw,
             "수량": qty,
             "매칭식품": ", ".join(dict.fromkeys(matched_names)),
             "등급": agg_grade,
-            "태그": ", ".join(dict.fromkeys(tag_union))
+            "태그": ", ".join(dict.fromkeys(tag_union)),
         })
 
-    return (
-        pd.DataFrame(per_item_rows),
-        dict(nutrient_counts),
-        pd.DataFrame(log_rows),
-        unmatched_names
-    )
+    return (pd.DataFrame(per_item_rows), dict(nutrient_counts), pd.DataFrame(log_rows), unmatched_names)
 
-
-def summarize_nutrients(
-    nutrient_counts: Dict[str, float],
-    df_food: pd.DataFrame,
-    nutrient_desc: Dict[str, str],
-    threshold: int = 1
-) -> pd.DataFrame:
-    # 태그 우주
-    all_tags = sorted({
-        t for tlist in df_food["태그리스트"].apply(_parse_taglist_cell) for t in tlist
-    })
-
-    # 태그가 하나도 없으면 '빈 테이블이지만 컬럼은 있는' DataFrame 반환
+def summarize_nutrients(nutrient_counts: Dict[str, float],
+                        df_food: pd.DataFrame,
+                        nutrient_desc: Dict[str, str],
+                        threshold: int = 1) -> pd.DataFrame:
+    all_tags = sorted({t for tlist in df_food["태그리스트"].apply(_parse_taglist_cell) for t in tlist})
     if not all_tags:
         return pd.DataFrame(columns=["영양소", "수량합", "상태", "한줄설명"])
-
     rows = []
     for tag in all_tags:
         cnt = float(nutrient_counts.get(tag, 0))
@@ -332,50 +250,14 @@ def summarize_nutrients(
             "상태": "충족" if cnt >= threshold else "부족",
             "한줄설명": nutrient_desc.get(tag, "")
         })
-
     out = pd.DataFrame(rows)
     return out.sort_values(["상태", "수량합", "영양소"], ascending=[True, False, True])
 
-
-# def recommend_next_meal(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str],
-#                         top_nutrients: int = 2, per_food: int = 4):
-#     """부족 영양소 중심 추천: Safe 식품 우선 + 간단 조합"""
-#     # 태그 우주 생성 시에도 안정적으로 리스트 파싱
-#     tag_universe = {tt for lst in df_food["태그리스트"].apply(_parse_taglist_cell) for tt in lst}
-#     tag_totals = {t: float(nutrient_counts.get(t, 0)) for t in tag_universe}
-#     lacking = [t for t, v in sorted(tag_totals.items(), key=lambda x: x[1]) if v < 1.0]
-#     lacking = lacking[:top_nutrients]
-
-#     suggestions = []
-#     for tag in lacking:
-#         pool = df_food[
-#             (df_food["등급"] == "Safe") &
-#             (df_food["태그리스트"].apply(lambda lst: tag in _parse_taglist_cell(lst)))
-#         ]
-#         foods = pool["식품"].dropna().astype(str).head(per_food).tolist()
-#         suggestions.append({
-#             "부족영양소": tag,
-#             "설명": nutrient_desc.get(tag, ""),
-#             "추천식품": foods
-#         })
-
-#     combo = []
-#     for s in suggestions:
-#         for f in s["추천식품"]:
-#             if f not in combo:
-#                 combo.append(f)
-#             if len(combo) >= 4:
-#                 break
-#         if len(combo) >= 4:
-#             break
-
-#     return suggestions, combo
 
 # ========= 개선된 다음 식사 제안 =========
 def _tag_deficits(nutrient_counts: Dict[str, float],
                   tag_universe: List[str],
                   tag_targets: Dict[str, float] | None = None) -> Dict[str, float]:
-    """태그별 부족량(>0) 계산"""
     tag_targets = tag_targets or {}
     deficits = {}
     for t in tag_universe:
@@ -386,119 +268,80 @@ def _tag_deficits(nutrient_counts: Dict[str, float],
             deficits[t] = lack
     return deficits
 
-
 def _food_score(tags: list[str],
                 deficits: Dict[str, float],
                 grade: str,
                 prefer_tags: set[str],
                 avoid_tags: set[str],
                 grade_weights: dict[str, float]) -> float:
-    """후보 식품의 점수: 부족 채움 가중치 × 등급 가중치 - 패널티"""
     if not tags:
         return 0.0
-
-    # 채워주는 양(부족 태그 합)
     gain = sum(deficits.get(t, 0.0) for t in tags)
-
-    # 등급 가중치 (Safe=1.0, Caution=0.6, Avoid=0)
-    gw = grade_weights.get(grade, 0.0)
+    gw = grade_weights.get(grade, 0.0)  # Safe=1.0, Caution=0.6, Avoid=0.0
     score = gain * gw
-
-    # 선호/회피 태그 가중(작게)
     if prefer_tags:
         score += 0.1 * sum(1.0 for t in tags if t in prefer_tags)
     if avoid_tags:
         score -= 0.2 * sum(1.0 for t in tags if t in avoid_tags)
-
     return score
-
 
 def recommend_next_meal(nutrient_counts: Dict[str, float],
                         df_food: pd.DataFrame,
                         nutrient_desc: Dict[str, str],
                         *,
-                        # 옵션 파라미터(필요 시 바꾸기)
-                        tag_targets: Dict[str, float] | None = None,   # 태그별 목표치 (기본 1.0)
-                        prefer_tags: list[str] | None = None,         # 선호 태그 (예: ['단백질','식이섬유'])
-                        avoid_tags: list[str] | None = None,          # 회피 태그 (예: ['당','탄수화물'])
-                        allowed_grades: tuple[str, ...] = ('Safe','Caution'),  # 제안 허용 등급
-                        grade_weights: dict[str, float] = None,       # 등급 가중치
-                        top_nutrients: int = 3,       # 상위 부족 태그 n개만 집중
-                        per_food: int = 6,            # 태그별 최대 후보 노출
-                        max_items: int = 4            # 제안 묶음 길이(최대 몇 가지 조합?)
-                        ):
-    """
-    개선 포인트
-      - 태그별 목표치 대비 '부족량'을 계산하고 그 부족을 가장 잘 메우는 식품을 고름
-      - Safe 우선, Caution은 패널티, Avoid는 기본적으로 제외
-      - 선호/회피 태그 반영(소폭 가중)
-      - 그리디로 서로 다른 태그를 최대한 커버하는 1~max_items 조합 생성
-    반환: (부족태그별 추천 테이블, 제안 조합 리스트)
-    """
+                        tag_targets: Dict[str, float] | None = None,
+                        prefer_tags: list[str] | None = None,
+                        avoid_tags: list[str] | None = None,
+                        allowed_grades: tuple[str, ...] = ('Safe','Caution'),
+                        grade_weights: dict[str, float] | None = None,
+                        top_nutrients: int = 3,
+                        per_food: int = 6,
+                        max_items: int = 4):
     prefer_tags = set(prefer_tags or [])
     avoid_tags = set(avoid_tags or [])
     if grade_weights is None:
         grade_weights = {'Safe': 1.0, 'Caution': 0.6, 'Avoid': 0.0}
 
-    # 태그 우주 & 부족량
     tag_universe = sorted({t for lst in df_food["태그리스트"].apply(_parse_taglist_cell) for t in lst})
     if not tag_universe:
         return [], []
 
     deficits_all = _tag_deficits(nutrient_counts, tag_universe, tag_targets)
     if not deficits_all:
-        return [], []  # 이미 목표 충족
+        return [], []
 
-    # 상위 부족 태그만 집중
     lacking_sorted = sorted(deficits_all.items(), key=lambda x: x[1], reverse=True)
     focus_tags = {t for t, _ in lacking_sorted[:max(1, top_nutrients)]}
 
-    # 후보 풀: 허용 등급만, 태그가 하나라도 focus 태그에 걸리는 식품
     cand = df_food[df_food["등급"].isin(allowed_grades)].copy()
     cand["태그리스트"] = cand["태그리스트"].apply(_parse_taglist_cell)
     cand = cand[cand["태그리스트"].apply(lambda lst: any(t in focus_tags for t in lst))]
-
     if cand.empty:
         return [], []
 
-    # 식품별 점수 계산
     cand["__score"] = cand.apply(
-        lambda r: _food_score(
-            r["태그리스트"],
-            deficits_all,
-            str(r["등급"]),
-            prefer_tags,
-            avoid_tags,
-            grade_weights
-        ), axis=1
+        lambda r: _food_score(r["태그리스트"], deficits_all, str(r["등급"]),
+                              prefer_tags, avoid_tags, grade_weights),
+        axis=1
     )
-
     cand = cand.sort_values("__score", ascending=False)
 
-    # 부족 태그별 top 후보 뽑아 설명용 테이블 구성
     suggestions = []
     for tag in sorted(focus_tags, key=lambda t: deficits_all[t], reverse=True):
         pool = cand[cand["태그리스트"].apply(lambda lst: tag in lst)]
         foods = pool["식품"].head(per_food).tolist()
-        suggestions.append({
-            "부족영양소": tag,
-            "설명": nutrient_desc.get(tag, ""),
-            "추천식품": foods
-        })
+        suggestions.append({"부족영양소": tag, "설명": nutrient_desc.get(tag, ""), "추천식품": foods})
 
-    # 그리디 조합: 점수 높은 순으로 뽑되, '아직 부족한 태그'를 더 많이 채우는 아이를 우선
     remaining = deficits_all.copy()
     picked = []
     for _, row in cand.iterrows():
         if len(picked) >= max_items:
             break
         tags = row["태그리스트"]
-        # 이 식품이 남아있는 부족을 실질적으로 줄이는가?
         gain = sum(remaining.get(t, 0.0) for t in tags)
         if gain <= 0:
             continue
         picked.append(str(row["식품"]))
-        # 남은 부족 업데이트 (한 번 선택 시 해당 태그 부족을 최대 1.0만큼만 줄인다고 가정)
         for t in tags:
             if t in remaining:
                 remaining[t] = max(0.0, remaining[t] - 1.0)
@@ -523,10 +366,8 @@ def append_unmatched_to_food_db(df_food: pd.DataFrame, unmatched_names: List[str
         df_new = df_food.copy()
     return df_new
 
-import json, base64, zlib
-import pandas as pd
-import streamlit as st
 
+# ==================== URL 상태 저장/복원 ====================
 def _b64_encode(obj: dict) -> str:
     raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     comp = zlib.compress(raw, level=9)
@@ -539,6 +380,21 @@ def _b64_decode(s: str) -> dict | None:
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return None
+
+def _set_query_state(state_b64: str):
+    try:
+        st.query_params.update({"state": state_b64})  # Streamlit 최신
+    except Exception:
+        st.experimental_set_query_params(state=state_b64)  # 구버전
+
+def _get_query_state() -> str | None:
+    try:
+        params = st.query_params  # Streamlit 최신
+        return params.get("state", None)
+    except Exception:
+        params = st.experimental_get_query_params()  # 구버전
+        vals = params.get("state")
+        return vals[0] if vals else None
 
 def save_state_to_url():
     """현재 입력/결과를 URL 쿼리파라미터(state=...)로 저장."""
@@ -558,20 +414,18 @@ def save_state_to_url():
         "last_combo": st.session_state.get("last_combo", []),
         "daily_date": st.session_state.get("daily_date", None),
     }
-    state_b64 = _b64_encode(data)
-    st.experimental_set_query_params(state=state_b64)
+    _set_query_state(_b64_encode(data))
 
 def load_state_from_url():
     """URL 쿼리파라미터(state)에서 상태 복원."""
-    params = st.experimental_get_query_params()
-    if "state" not in params:
+    state = _get_query_state()
+    if not state:
         return
-    decoded = _b64_decode(params["state"][0])
+    decoded = _b64_decode(state)
     if not decoded:
         return
-    # 날짜가 바뀌었으면 복원하지 않고 초기화
     if decoded.get("daily_date") and decoded["daily_date"] != st.session_state.get("daily_date"):
-        return
+        return  # 날짜 바뀌면 복원하지 않음(자정 초기화 유지)
 
     st.session_state.inputs = decoded.get("inputs", {})
     st.session_state["threshold"] = decoded.get("threshold", 1)
@@ -593,7 +447,7 @@ def main():
 
     # ✅ 자정 기준 하루 메모리 초기화
     init_daily_state()
-    remain = (next_midnight() - datetime.now(KST))
+    remain = (next_midnight() - datetime.now(TZ))
     st.caption(f"현재 입력/결과는 **자정까지 자동 보존**됩니다. 남은 시간: 약 {remain.seconds//3600}시간 {remain.seconds%3600//60}분")
 
     # ✅ 새로고침/새 탭 복원: URL에 저장된 상태 로드
@@ -620,7 +474,7 @@ def main():
     # 날짜(기록용)
     d = st.date_input("기록 날짜", value=date.today())
 
-    # 슬롯별 입력 (session_state에 보존)
+    # 슬롯별 입력
     with st.container():
         for slot in SLOTS:
             val = st.text_area(
@@ -628,12 +482,12 @@ def main():
                 key=f"ta_{slot}",
                 value=st.session_state.inputs.get(slot, "")
             )
-            st.session_state.inputs[slot] = val  # 유지
+            st.session_state.inputs[slot] = val
 
-    # 옵션/버튼 (session_state에 보존)
+    # 옵션/버튼
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        threshold = st.number_input(
+        st.number_input(
             "충족 임계(수량합)",
             min_value=1, max_value=5,
             value=st.session_state.get("threshold", 1),
@@ -641,7 +495,7 @@ def main():
             key="threshold"
         )
     with c2:
-        export_flag = st.checkbox(
+        st.checkbox(
             "log.csv 저장",
             value=st.session_state.get("export_flag", True),
             key="export_flag"
@@ -766,9 +620,9 @@ def main():
             st.info("간단 조합 제안: " + " / ".join(st.session_state.last_combo[:4]))
 
 
-
 if __name__ == "__main__":
     if st is None:
-        pass
+        print("This script requires Streamlit to run the UI. Install with: pip install streamlit")
+        sys.exit(1)
     else:
         main()
