@@ -781,52 +781,15 @@ with tab4:
 
 
 # ==== [ADDON] 즉석 식단 평가 + 영양 한줄 코멘트
-
-# --- Nutrient simple explanations (extended) ---
-if 'NUTRIENT_TIPS' not in globals():
-    NUTRIENT_TIPS = {}
-NUTRIENT_TIPS_LONG = {
-    "단백질": "근육 유지, 상처 회복, 포만감 유지에 핵심.",
-    "식이섬유": "배변 규칙성, 포만감, 혈당 급상승 완화에 도움.",
-    "철": "피로감·어지러움 예방(산소 운반). 비타민 C와 함께 섭취하면 흡수↑",
-    "칼슘": "뼈·치아 건강, 신경·근육 기능.",
-    "마그네슘": "근육 이완, 수면·긴장 완화, 에너지 대사.",
-    "칼륨": "나트륨 배출을 도와 붓기·혈압 조절.",
-    "오메가3": "심혈관·뇌 건강, 염증 균형.",
-    "비타민A": "야간 시력·피부·점막 보호.",
-    "비타민B": "에너지 생성·피로 완화(복합군).",
-    "비타민C": "면역, 철 흡수, 항산화.",
-    "비타민D": "칼슘 흡수·뼈 건강, 면역 조절.",
-    "비타민E": "항산화(세포 보호), 피부 컨디션.",
-    "저당": "식후 혈당 출렁임 감소.",
-    "저염": "붓기 완화·혈압 관리.",
-    "건강한지방": "포만감·지용성 비타민 흡수 도우미."
-}
-NUTRIENT_SOURCES = {
-    "단백질": ["닭가슴살", "두부", "연어", "계란", "대구구이", "요거트"],
-    "식이섬유": ["현미밥", "귀리", "브로콜리", "양배추", "아보카도", "버섯"],
-    "철": ["시금치", "귀리", "붉은살 생선", "콩류"],
-    "칼슘": ["두부", "브로콜리", "요거트", "아몬드"],
-    "마그네슘": ["현미밥", "시금치", "견과류"],
-    "칼륨": ["아보카도", "바나나", "감자", "시금치"],
-    "오메가3": ["연어", "등푸른 생선", "호두"],
-    "비타민A": ["당근", "시금치", "호박"],
-    "비타민B": ["버섯", "통곡물", "달걀"],
-    "비타민C": ["브로콜리", "양배추", "키위", "파프리카"],
-    "비타민D": ["계란", "연어", "버섯(일광 건조)"],
-    "비타민E": ["올리브유", "아몬드", "아보카도"],
-    "저당": ["채소 위주 반찬", "통곡물 소량", "무가당 요거트"],
-    "저염": ["구운/찐 조리", "양념절제", "허브·레몬 활용"],
-    "건강한지방": ["올리브유", "아보카도", "견과류"]
-}
- ===============================
+# ==== [ADDON] 즉석 식단 평가 + 영양 한줄 코멘트 ===============================
 # 이 블록은 기존 코드에 영향을 주지 않고, 페이지 하단에 "즉석 식단 평가" 섹션을 추가합니다.
 # 원 코드의 변수(food_db, CORE_NUTRIENTS, ESSENTIALS, gen_meal 등)가 있으면 그대로 활용하고,
 # 없으면 내부 기본값을 사용합니다.
 try:
     import streamlit as st
     import pandas as pd
-    import re, random
+    import re
+    import random
     from difflib import get_close_matches
 except Exception:
     pass
@@ -838,8 +801,10 @@ if 'CORE_NUTRIENTS' not in globals():
         "오메가3", "비타민A", "비타민B", "비타민C", "비타민D", "비타민E",
         "저당", "저염", "건강한지방"
     ]
+
 if 'ESSENTIALS' not in globals():
     ESSENTIALS = ["단백질", "식이섬유", "비타민C", "칼슘"]
+
 if 'food_db' not in globals():
     FOOD_ROWS = [
         ("닭가슴살", "Safe", ["단백질", "저지방"]),
@@ -883,6 +848,45 @@ if 'NUTRIENT_TIPS' not in globals():
         "저지방": "열량 대비 단백질 확보에 유리."
     }
 
+# 확장형 설명/대표식품
+if 'NUTRIENT_TIPS_LONG' not in globals():
+    NUTRIENT_TIPS_LONG = {
+        "단백질": "근육 유지, 상처 회복, 포만감 유지에 핵심.",
+        "식이섬유": "배변 규칙성, 포만감, 혈당 급상승 완화에 도움.",
+        "철": "피로감·어지러움 예방(산소 운반). 비타민 C와 함께 섭취하면 흡수↑",
+        "칼슘": "뼈·치아 건강, 신경·근육 기능.",
+        "마그네슘": "근육 이완, 수면·긴장 완화, 에너지 대사.",
+        "칼륨": "나트륨 배출을 도와 붓기·혈압 조절.",
+        "오메가3": "심혈관·뇌 건강, 염증 균형.",
+        "비타민A": "야간 시력·피부·점막 보호.",
+        "비타민B": "에너지 생성·피로 완화(복합군).",
+        "비타민C": "면역, 철 흡수, 항산화.",
+        "비타민D": "칼슘 흡수·뼈 건강, 면역 조절.",
+        "비타민E": "항산화(세포 보호), 피부 컨디션.",
+        "저당": "식후 혈당 출렁임 감소.",
+        "저염": "붓기 완화·혈압 관리.",
+        "건강한지방": "포만감·지용성 비타민 흡수 도우미."
+    }
+
+if 'NUTRIENT_SOURCES' not in globals():
+    NUTRIENT_SOURCES = {
+        "단백질": ["닭가슴살", "두부", "연어", "계란", "대구구이", "요거트"],
+        "식이섬유": ["현미밥", "귀리", "브로콜리", "양배추", "아보카도", "버섯"],
+        "철": ["시금치", "귀리", "붉은살 생선", "콩류"],
+        "칼슘": ["두부", "브로콜리", "요거트", "아몬드"],
+        "마그네슘": ["현미밥", "시금치", "견과류"],
+        "칼륨": ["아보카도", "바나나", "감자", "시금치"],
+        "오메가3": ["연어", "등푸른 생선", "호두"],
+        "비타민A": ["당근", "시금치", "호박"],
+        "비타민B": ["버섯", "통곡물", "달걀"],
+        "비타민C": ["브로콜리", "양배추", "키위", "파프리카"],
+        "비타민D": ["계란", "연어", "버섯(일광 건조)"],
+        "비타민E": ["올리브유", "아몬드", "아보카도"],
+        "저당": ["채소 위주 반찬", "통곡물 소량", "무가당 요거트"],
+        "저염": ["구운/찐 조리", "양념절제", "허브·레몬 활용"],
+        "건강한지방": ["올리브유", "아보카도", "견과류"]
+    }
+
 if 'VIRTUAL_RULES' not in globals():
     VIRTUAL_RULES = {}
 
@@ -894,39 +898,33 @@ def _split_free_text(text: str):
 def _parse_qty(token: str):
     m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*$", token)
     if m:
-        qty = float(m.group(1)); name = token[:m.start()].strip()
+        qty = float(m.group(1))
+        name = token[:m.start()].strip()
         return name, qty
     return token.strip(), 1.0
 
 def _contains_any(text: str, keywords):
     t = (text or "").lower()
-    for k in keywords or []:
+    for k in (keywords or []):
         if k.lower() in t:
             return True
     return False
 
-def _match_food(name: str, df: pd.DataFrame):
+def _match_food(name: str, df):
     names = df["식품"].tolist()
     if name in names:
         return name, True
-    try:
-        from difflib import get_close_matches
-        cand = get_close_matches(name, names, n=1, cutoff=0.6)
-    except Exception:
-        cand = []
+    cand = get_close_matches(name, names, n=1, cutoff=0.6)
     if cand:
         return cand[0], True
     base = re.sub(r"(구이|볶음|찜|샐러드|수프|조림|구운|생)", "", name).strip()
     if base and base != name:
-        try:
-            cand = get_close_matches(base, names, n=1, cutoff=0.6)
-        except Exception:
-            cand = []
+        cand = get_close_matches(base, names, n=1, cutoff=0.6)
         if cand:
             return cand[0], True
     return name, False
 
-def _score_tokens(free_text: str, df_food: pd.DataFrame, user_rules: dict):
+def _score_tokens(free_text, df_food, user_rules):
     tokens = _split_free_text(free_text)
     rows = []
     score = {k: 0.0 for k in CORE_NUTRIENTS}
@@ -970,13 +968,37 @@ def _score_tokens(free_text: str, df_food: pd.DataFrame, user_rules: dict):
 
 def _ensure_log():
     try:
-        return ensure_log()  # 원 코드가 제공하면 사용
+        return ensure_log()
     except Exception:
         return pd.DataFrame(columns=["type", "date", "time", "food_norm", "item"])
 
+def _tokens_from_today_log():
+    import datetime as _dt
+    df = _ensure_log()
+    if df is None or df.empty:
+        return []
+    # Keep only today's entries up to now
+    today = _dt.datetime.now().date()
+    try:
+        df['date'] = pd.to_datetime(df['date']).dt.date
+    except Exception:
+        return []
+    df_today = df[(df['type'] == 'food') & (df['date'] == today)].copy()
+    now_time = _dt.datetime.now().time()
+    try:
+        df_today['time'] = pd.to_datetime(df_today['time'].astype(str), errors='coerce').dt.time
+        df_today = df_today[df_today['time'].isna() | (df_today['time'] <= now_time)]
+    except Exception:
+        pass
+    tokens = []
+    for _, r in df_today.iterrows():
+        token = (str(r.get('item') or '')).strip() or (str(r.get('food_norm') or '')).strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
 def _gen_meal_wrapper(df, include_caution, favor_tags, recent_items, user_rules, seed):
     try:
-        # 원 코드의 gen_meal이 있으면 우선 사용
         rng = random.Random(seed)
         title, meal, explain = gen_meal(
             df, include_caution, mode="기본",
@@ -985,14 +1007,14 @@ def _gen_meal_wrapper(df, include_caution, favor_tags, recent_items, user_rules,
         )
         return title, meal, explain
     except Exception:
-        # 최소 대체 로직
         df2 = df.copy()
         if not include_caution:
             df2 = df2[df2["등급"] != "Caution"]
         pool = df2["식품"].tolist()
         rng = random.Random(seed)
         picks = rng.sample(pool, k=min(3, len(pool))) if len(pool) >= 3 else pool
-        return "다음 식사 제안", picks, ("부족 태그 보완 중심: " + ", ".join(favor_tags)) if favor_tags else ""
+        explain = ("부족 태그 보완 중심: " + ", ".join(favor_tags)) if favor_tags else ""
+        return "다음 식사 제안", picks, explain
 
 # UI 섹션 -------------------------------------------------------
 try:
@@ -1002,15 +1024,17 @@ try:
 
         with st.expander("📘 영양소 한눈 요약 (무엇에 좋은가 + 대표 식품)", expanded=False):
             df_gloss = pd.DataFrame([
-                {"영양소": k, "무엇에 좋은가(쉽게)": NUTRIENT_TIPS_LONG.get(k, NUTRIENT_TIPS.get(k, "")),
-                 "대표 식품": ", ".join(NUTRIENT_SOURCES.get(k, [])[:4])}
-                for k in CORE_NUTRIENTS if k in NUTRIENT_TIPS or k in NUTRIENT_TIPS_LONG
+                {
+                    "영양소": k,
+                    "무엇에 좋은가(쉽게)": NUTRIENT_TIPS_LONG.get(k, NUTRIENT_TIPS.get(k, "")),
+                    "대표 식품": ", ".join(NUTRIENT_SOURCES.get(k, [])[:4])
+                }
+                for k in CORE_NUTRIENTS if (k in NUTRIENT_TIPS or k in NUTRIENT_TIPS_LONG)
             ])
             st.dataframe(df_gloss, use_container_width=True, height=380)
             st.caption("• 점수 표의 ‘한줄설명’과 동일한 톤으로 정리했습니다. 부족 태그가 뜨면 여기의 대표 식품을 참고해 다음 식사를 구성해보세요.")
 
-        # 로컬 규칙 입력(원 코드의 사이드바 규칙과 별개로 이 섹션에서만 사용)
-        colA, colB, colC, colD = st.columns([1.2,1.2,1,1])
+        colA, colB, colC, colD = st.columns([1.2, 1.2, 1, 1])
         with colA:
             avoid = st.text_input("회피 키워드(쉼표)", value="")
         with colB:
@@ -1025,51 +1049,25 @@ try:
             "allow_keywords": [x.strip() for x in allow.split(",") if x.strip()],
         }
 
-        sample = "쌀밥1, 대구구이1, 양배추1, 당근1, 올리브유0.5"
         source_mode = st.radio("분석 소스", ["오늘 기록 사용", "직접 입력"], horizontal=True, index=0)
-sample = "쌀밥1, 대구구이1, 양배추1, 당근1, 올리브유0.5"
-text_in = st.text_area("식단 텍스트 (쉼표/줄바꿈 구분)", height=120, placeholder=sample,
-                       disabled=(source_mode=="오늘 기록 사용"))
+        sample = "쌀밥1, 대구구이1, 양배추1, 당근1, 올리브유0.5"
+        text_in = st.text_area(
+            "식단 텍스트 (쉼표/줄바꿈 구분)",
+            height=120,
+            placeholder=sample,
+            disabled=(source_mode == "오늘 기록 사용")
+        )
 
-def _tokens_from_today_log():
-    import datetime as _dt
-    df = _ensure_log()
-    if df is None or df.empty:
-        return []
-    # Expect columns: type, date, time, food_norm, item
-    # Keep only today's entries up to now
-    today = _dt.datetime.now().date()
-    try:
-        df['date'] = pd.to_datetime(df['date']).dt.date
-    except Exception:
-        return []
-    df_today = df[(df['type']=='food') & (df['date']==today)].copy()
-    # If time exists, keep entries up to current time
-    now_time = _dt.datetime.now().time()
-    try:
-        df_today['time'] = pd.to_datetime(df_today['time'].astype(str), errors='coerce').dt.time
-        df_today = df_today[df_today['time'].isna() | (df_today['time'] <= now_time)]
-    except Exception:
-        pass
-    # Build tokens: prefer 'item' if present, else 'food_norm'
-    tokens = []
-    for _, r in df_today.iterrows():
-        token = (str(r.get('item') or '')).strip() or (str(r.get('food_norm') or '')).strip()
-        if token:
-            tokens.append(token)
-    return tokens
+        if source_mode == "오늘 기록 사용":
+            _toks = _tokens_from_today_log()
+            if _toks:
+                st.caption("오늘 기록에서 불러온 항목: " + ", ".join(_toks))
+                text_in = ", ".join(_toks)
+            else:
+                st.info("오늘 날짜의 음식 기록이 없어요. 직접 입력으로 전환해 주세요.")
 
-if source_mode == "오늘 기록 사용":
-    _toks = _tokens_from_today_log()
-    if _toks:
-        # Show a preview of what's being analyzed
-        st.caption("오늘 기록에서 불러온 항목: " + ", ".join(_toks))
-        text_in = ", ".join(_toks)
-    else:
-        st.info("오늘 날짜의 음식 기록이 없어요. 직접 입력으로 전환해 주세요.")
-
-
-        if st.button("분석하기", type="primary"):
+        analyze = st.button("분석하기", type="primary")
+        if analyze:
             try:
                 scores, items_df = _score_tokens(text_in, food_db, user_rules_local)
 
@@ -1080,9 +1078,11 @@ if source_mode == "오늘 기록 사용":
                     st.dataframe(items_df, use_container_width=True, height=260)
 
                 st.markdown("#### 🧭 태그 점수 + 한줄 설명")
-                score_df = (pd.DataFrame([scores]).T
-                            .reset_index().rename(columns={"index":"영양소", 0:"점수"})
-                            .sort_values("점수", ascending=False))
+                score_df = (
+                    pd.DataFrame([scores]).T
+                    .reset_index().rename(columns={"index": "영양소", 0: "점수"})
+                    .sort_values("점수", ascending=False)
+                )
                 score_df["한줄설명"] = score_df["영양소"].map(lambda x: NUTRIENT_TIPS.get(x, ""))
                 st.dataframe(score_df, use_container_width=True, height=320)
 
@@ -1093,7 +1093,6 @@ if source_mode == "오늘 기록 사용":
                 else:
                     st.success("핵심 태그 충족! (ESSENTIALS 기준)")
 
-                # 최근 항목(다양화용) — 원 코드 로그가 있으면 활용
                 recent_items = []
                 try:
                     if diversity_n > 0:
@@ -1115,7 +1114,7 @@ if source_mode == "오늘 기록 사용":
                 for i in range(3):
                     try:
                         title, meal, explain = _gen_meal_wrapper(
-                            food_db, include_caution, favor_tags, recent_items, user_rules_local, seed+i
+                            food_db, include_caution, favor_tags, recent_items, user_rules_local, seed + i
                         )
                         with cols[i]:
                             st.markdown(f"**{title} #{i+1}**")
@@ -1129,8 +1128,9 @@ if source_mode == "오늘 기록 사용":
                         st.error(f"제안 생성 실패: {e}")
             except Exception as e:
                 st.error(f"분석 실패: {e}")
-except Exception as _addon_err:
-    # UI 추가에 실패해도 기존 앱은 계속 동작하도록 합니다.
+except Exception:
+    # UI 추가 실패 시에도 기존 앱이 계속 동작하도록 무시
     pass
 
+# ==== [END ADDON] =============================================================
 # ==== [END ADDON] =============================================================
