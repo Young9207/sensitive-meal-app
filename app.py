@@ -4,6 +4,13 @@ import pandas as pd
 import json, re, random, time, os, io, zipfile, math
 from datetime import date, time as dtime, datetime
 
+# --- Safe default for debug flag ---
+try:
+    debug = os.environ.get('DEBUG', '0').strip().lower() in ('1','true','yes','y','on')
+except Exception:
+    debug = False
+
+
 st.set_page_config(page_title="민감도 식사 로그 • 현실형 제안 (안정화)", page_icon="🥣", layout="wide")
 
 def _force_rerun():
