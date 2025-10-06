@@ -632,27 +632,48 @@ with tab2:
             with cols[idx]:
                 st.error("제안 생성 중 오류")
                 if debug: st.exception(e)
-
+                
 with tab3:
     st.subheader("내보내기/백업")
     try:
-        with open(LOG_PATH, "rb") as f:
-            st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
-            if os.path.exists(USER_RULES_PATH):
-                with open(USER_RULES_PATH, "rb") as f:
-                st.download_button("⬇️ user_rules.json 다운로드", data=f, file_name="user_rules.json", mime="application/json")
+        # 개별 파일 다운로드 (존재할 때만 노출)
+        if os.path.exists(LOG_PATH):
+            with open(LOG_PATH, "rb") as f:
+                st.download_button(
+                    "⬇️ log.csv 다운로드",
+                    data=f.read(),
+                    file_name="log.csv",
+                    mime="text/csv"
+                )
+
+        if os.path.exists(USER_RULES_PATH):
+            with open(USER_RULES_PATH, "rb") as f:
+                st.download_button(
+                    "⬇️ user_rules.json 다운로드",
+                    data=f.read(),
+                    file_name="user_rules.json",
+                    mime="application/json"
+                )
+
+        # ZIP 백업 만들기
         if st.button("📦 전체 백업 ZIP 만들기"):
             mem_zip = io.BytesIO()
             with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for p in [LOG_PATH, FOOD_DB_PATH, USER_RULES_PATH]:
-                    if os.path.exists(p):
-                        with open(p, "rb") as f:
-                            zf.writestr(os.path.basename(p), f.read())
+                    if p and os.path.exists(p):
+                        # 파일을 메모리에 읽지 않고 바로 추가
+                        zf.write(p, arcname=os.path.basename(p))
             mem_zip.seek(0)
-            st.download_button("⬇️ 백업 ZIP 다운로드", data=mem_zip, file_name="meal_app_backup.zip", mime="application/zip")
+            st.download_button(
+                "⬇️ 백업 ZIP 다운로드",
+                data=mem_zip,
+                file_name="meal_app_backup.zip",
+                mime="application/zip"
+            )
     except Exception as e:
-        st.error("내보내기 중 오류")
-        if debug: st.exception(e)
+        st.error("내보내기 중 오류가 발생했습니다.")
+        if debug:
+            st.exception(e)
 
 with tab4:
     st.subheader("🛠 기록/DB 편집 & 복구")
