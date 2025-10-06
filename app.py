@@ -1279,7 +1279,7 @@ try:
     )
     for n in missing
 ]
-st.warning(...)
+                    st.warning('\n'.join(tips_list))
 
                     st.success("핵심 태그 충족! (ESSENTIALS 기준)")
 
