@@ -16,6 +16,66 @@ def _force_rerun():
             pass
 
 
+
+# === nutrient_dict.csv 연동 ===
+NUTRIENT_TIPS = dict(globals().get("NUTRIENT_TIPS", {}))  # 짧은 한줄설명
+NUTRIENT_TIPS_LONG = dict(globals().get("NUTRIENT_TIPS_LONG", {}))  # 자세한설명
+BENEFIT_MAP = dict(globals().get("BENEFIT_MAP", {}))  # 태그 → 베네핏 라벨/설명
+NUTRIENT_EXAMPLES = dict(globals().get("NUTRIENT_EXAMPLES", {}))  # 영양소 → 대표식품 예시 리스트
+
+def _load_nutrient_dict_csv(paths=("data/nutrient_dict.csv", "/mnt/data/nutrient_dict.csv")):
+    """
+    nutrient_dict.csv 스키마:
+      - 영양소
+      - 한줄설명
+      - 자세한설명
+      - 혜택라벨(요약)
+      - 대표식품(쉼표로구분)
+    """
+    import pandas as _pd, os as _os
+    for _p in paths:
+        try:
+            if _os.path.exists(_p):
+                _df = _pd.read_csv(_p)
+                for _, _r in _df.iterrows():
+                    key = str(_r.get("영양소") or "").strip()
+                    if not key:
+                        continue
+                    short = str(_r.get("한줄설명") or "").strip()
+                    long = str(_r.get("자세한설명") or "").strip()
+                    label = str(_r.get("혜택라벨(요약)") or "").strip()
+                    examples = str(_r.get("대표식품(쉼표로구분)") or "").strip()
+
+                    if short:
+                        NUTRIENT_TIPS[key] = short
+                    if long:
+                        NUTRIENT_TIPS_LONG[key] = long
+                    # BENEFIT_MAP은 가능한 간결한 라벨을 우선
+                    if label:
+                        BENEFIT_MAP[key] = label
+                    elif short:
+                        BENEFIT_MAP[key] = short
+
+                    if examples:
+                        NUTRIENT_EXAMPLES[key] = [x.strip() for x in examples.split(",") if x.strip()]
+                return True
+        except Exception:
+            pass
+    return False
+
+# 최초 로드 시도
+try:
+    _nd_ok = _load_nutrient_dict_csv()
+    if _nd_ok:
+        if debug:
+            st.caption("✅ nutrient_dict.csv 로드됨")
+    else:
+        if debug:
+            st.caption("ℹ️ nutrient_dict.csv를 찾지 못했거나 컬럼이 맞지 않습니다.")
+except Exception as _e:
+    if 'st' in globals() and debug:
+        st.warning("nutrient_dict.csv 로드 중 오류 발생")
+        st.exception(_e)
 FOOD_DB_PATH = "food_db.csv"
 LOG_PATH = "log.csv"
 USER_RULES_PATH = "user_rules.json"
@@ -583,8 +643,8 @@ with tab2:
                 st.markdown("부족/미달 영양소와 간단 설명:")
                 rows = []
                 for k in low_keys:
-                    tip = NUTRIENT_TIPS.get(k, NUTRIENT_TIPS.get(_nut_ko(k), "")) if 'NUTRIENT_TIPS' in globals() else ""
-                    rows.append(f"- **{k}**: {tip}")
+                    tip = _lookup_tip(k)
+                    rows.append(f"- **{_friendly_label(k)}**: {tip}")
                 st.markdown("\\n".join(rows))
 
                 # 예시 식품 추천 (food_db의 태그 기반)
@@ -604,7 +664,7 @@ with tab2:
                             if len(cand) >= 6:
                                 break
                         if cand:
-                            eg_lines.append(f"  • **{k}** 예시: " + ", ".join(sorted(set(cand))[:6]))
+                            eg_lines.append(f"  • **{_friendly_label(k)}** 예시: " + ", ".join(sorted(set(cand))[:6]))
                     if eg_lines:
                         st.markdown("보강에 도움이 되는 식품 예시:")
                         st.markdown("\\n".join(eg_lines))
@@ -1097,7 +1157,7 @@ def _per_meal_breakdown(df_food, df_today):
             except Exception:
                 tags = []
         for t in tags:
-            b = _benefit_from_tag(t)
+            b = (_benefit_from_tag(t) or _lookup_tip(t))
             if b and b not in benefits:
                 benefits.append(b)
         rows.append({
@@ -1205,12 +1265,14 @@ try:
                     .reset_index().rename(columns={"index": "영양소", 0: "점수"})
                     .sort_values("점수", ascending=False)
                 )
-                score_df["한줄설명"] = score_df["영양소"].map(lambda x: NUTRIENT_TIPS.get(x, ""))
+                score_df["영양소(보기)"] = score_df["영양소"].map(_friendly_label)
+                score_df["한줄설명"] = score_df["영양소"].map(lambda x: _lookup_tip(x))
                 st.dataframe(score_df, use_container_width=True, height=320)
 
                 missing = [n for n in ESSENTIALS if scores.get(n, 0) < 1]
                 if missing:
-                    tips_list = [f"- **{n}**: {NUTRIENT_TIPS.get(n, '')}" for n in missing]
+                    tips_list = [f"- **{_friendly_label(n)}**: {(BENEFIT_MAP.get(_canon_key(n)) or NUTRIENT_TIPS.get(_canon_key(n), ''))}
+   예시: {', '.join(_example_foods_for(n))}" for n in missing]
                     st.warning("부족 태그:\n" + "\n".join(tips_list))
                 else:
                     st.success("핵심 태그 충족! (ESSENTIALS 기준)")
@@ -1402,6 +1464,125 @@ def _parse_tags_flexible(v):
             out.append(p)
     return out
 
+
+# === User-friendly nutrient mapping & synonyms ===
+NUTRIENT_SYNONYMS = dict(globals().get("NUTRIENT_SYNONYMS", {}))
+NUTRIENT_FRIENDLY = dict(globals().get("NUTRIENT_FRIENDLY", {}))
+NUTRIENT_DEFAULT_EXAMPLES = dict(globals().get("NUTRIENT_DEFAULT_EXAMPLES", {}))
+
+# Canonical → friendly label (emoji + Korean)
+NUTRIENT_FRIENDLY.update({
+    "Protein": "단백질 🍗",
+    "Fiber": "식이섬유 🥦",
+    "ComplexCarb": "복합탄수화물 🍚",
+    "HealthyFat": "건강한 지방 🥑",
+    "Omega3": "오메가-3 🐟",
+    "A": "비타민 A 🥕",
+    "B": "비타민 B군 🍞",
+    "C": "비타민 C 🍊",
+    "D": "비타민 D ☀️",
+    "E": "비타민 E 🥜",
+    "K": "비타민 K 🥬",
+    "Ca": "칼슘 🦴",
+    "Mg": "마그네슘 😌",
+    "Fe": "철분 💪",
+    "K_potassium": "칼륨(부종/혈압) 🧂↘️",
+})
+
+# Abbreviation & alias → canonical key
+NUTRIENT_SYNONYMS.update({
+    "Protein":"Protein", "단백질":"Protein",
+    "Fiber":"Fiber", "식이섬유":"Fiber",
+    "ComplexCarb":"ComplexCarb","복합탄수화물":"ComplexCarb","slowcarb":"ComplexCarb","slow_carb":"ComplexCarb",
+    "HealthyFat":"HealthyFat","건강한지방":"HealthyFat","goodfat":"HealthyFat",
+    "Omega3":"Omega3","오메가3":"Omega3","오메가-3":"Omega3","EPA/DHA":"Omega3",
+    "A":"A","비타민A":"A",
+    "B":"B","비타민B":"B","비타민B군":"B",
+    "C":"C","비타민C":"C",
+    "D":"D","비타민D":"D",
+    "E":"E","비타민E":"E",
+    "K":"K","비타민K":"K",
+    "Ca":"Ca","칼슘":"Ca",
+    "Mg":"Mg","마그네슘":"Mg",
+    "Fe":"Fe","철":"Fe","철분":"Fe",
+    "K_potassium":"K_potassium","칼륨":"K_potassium","Potassium":"K_potassium",
+})
+
+# Fallback examples when none in CSV / food_db
+NUTRIENT_DEFAULT_EXAMPLES.update({
+    "Protein": ["닭가슴살","두부","연어","계란","그릭요거트"],
+    "Fiber": ["현미밥","귀리","사과","브로콜리","렌틸콩"],
+    "ComplexCarb": ["현미밥","귀리","통밀빵","고구마","퀴노아"],
+    "HealthyFat": ["아보카도","올리브유","아몬드","호두","참치"],
+    "Omega3": ["연어","고등어","정어리","호두","치아시드"],
+    "A": ["당근","호박","시금치","케일","간"],
+    "B": ["현미","귀리","달걀","버섯","돼지고기"],
+    "C": ["키위","파프리카","브로콜리","귤","딸기"],
+    "D": ["연어","계란","버섯(일광건조)","강화우유"],
+    "E": ["아몬드","해바라기씨","올리브유","아보카도"],
+    "K": ["케일","시금치","브로콜리","상추"],
+    "Ca": ["두부","요거트","멸치","브로콜리","우유"],
+    "Mg": ["시금치","현미","아몬드","호두","다크초콜릿"],
+    "Fe": ["소간","시금치","홍합","렌틸콩","강화시리얼"],
+    "K_potassium": ["바나나","아보카도","감자","고구마","시금치"],
+})
+
+def _canon_key(k: str):
+    k = str(k or "").strip()
+    return NUTRIENT_SYNONYMS.get(k, k)
+
+def _friendly_label(k: str):
+    key = _canon_key(k)
+    return NUTRIENT_FRIENDLY.get(key, key)
+
+
+def _lookup_tip(key: str):
+    """BENEFIT_MAP 우선, 없으면 NUTRIENT_TIPS. 한/영 양쪽 키 모두 시도."""
+    k = _canon_key(key)
+    # canonical 먼저
+    v = (BENEFIT_MAP.get(k) or NUTRIENT_TIPS.get(k) or NUTRIENT_TIPS_LONG.get(k) if 'NUTRIENT_TIPS_LONG' in globals() else None)
+    if v: return v
+    # 원 키(한글일 수 있음)도 시도
+    return (BENEFIT_MAP.get(key) or NUTRIENT_TIPS.get(key) or (NUTRIENT_TIPS_LONG.get(key) if 'NUTRIENT_TIPS_LONG' in globals() else "")) or ""
+
+def _harmonize_mappings():
+    """현재 로딩된 사전의 키들을 한/영 모두로 복제하여 조회 실패를 방지."""
+    try:
+        # 복사본에서 순회
+        for dname in ["NUTRIENT_TIPS", "NUTRIENT_TIPS_LONG", "BENEFIT_MAP", "NUTRIENT_EXAMPLES"]:
+            if dname not in globals():
+                continue
+            d = globals()[dname]
+            if not isinstance(d, dict):
+                continue
+            add_items = {}
+            for k, v in list(d.items()):
+                ck = _canon_key(k)
+                if ck and ck not in d and v not in (None, ""):
+                    add_items[ck] = v
+                # 반대로 한글 키도 확보 (친절 라벨에서 한국어 조회 시)
+                # 간단 매핑: canonical → friendly 라벨에서 한국어 추출
+                try:
+                    # _friendly_label(ck) 반환값이 "비타민 C 🍊" 같은 형태일 수 있으므로 한글만 쓰지 않고 ck 자체 사용
+                    pass
+                except Exception:
+                    pass
+            d.update(add_items)
+    except Exception:
+        pass
+
+# 실행 시점에 한 번 정합화
+_harmonize_mappings()
+def _example_foods_for(k: str, limit=6):
+    key = _canon_key(k)
+    ex = []
+    try:
+        ex = (NUTRIENT_EXAMPLES.get(key) if 'NUTRIENT_EXAMPLES' in globals() else None) or []
+    except Exception:
+        ex = []
+    if not ex:
+        ex = NUTRIENT_DEFAULT_EXAMPLES.get(key, [])
+    return list(dict.fromkeys(ex))[:limit]
 def _benefit_from_tag(tag):
     """
     단일 태그에서 베네핏 한줄을 생성.
