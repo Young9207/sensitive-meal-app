@@ -268,39 +268,173 @@ def summarize_nutrients(
     return out.sort_values(["상태", "수량합", "영양소"], ascending=[True, False, True])
 
 
-def recommend_next_meal(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str],
-                        top_nutrients: int = 2, per_food: int = 4):
-    """부족 영양소 중심 추천: Safe 식품 우선 + 간단 조합"""
-    # 태그 우주 생성 시에도 안정적으로 리스트 파싱
-    tag_universe = {tt for lst in df_food["태그리스트"].apply(_parse_taglist_cell) for tt in lst}
-    tag_totals = {t: float(nutrient_counts.get(t, 0)) for t in tag_universe}
-    lacking = [t for t, v in sorted(tag_totals.items(), key=lambda x: x[1]) if v < 1.0]
-    lacking = lacking[:top_nutrients]
+# def recommend_next_meal(nutrient_counts: Dict[str, float], df_food: pd.DataFrame, nutrient_desc: Dict[str, str],
+#                         top_nutrients: int = 2, per_food: int = 4):
+#     """부족 영양소 중심 추천: Safe 식품 우선 + 간단 조합"""
+#     # 태그 우주 생성 시에도 안정적으로 리스트 파싱
+#     tag_universe = {tt for lst in df_food["태그리스트"].apply(_parse_taglist_cell) for tt in lst}
+#     tag_totals = {t: float(nutrient_counts.get(t, 0)) for t in tag_universe}
+#     lacking = [t for t, v in sorted(tag_totals.items(), key=lambda x: x[1]) if v < 1.0]
+#     lacking = lacking[:top_nutrients]
 
+#     suggestions = []
+#     for tag in lacking:
+#         pool = df_food[
+#             (df_food["등급"] == "Safe") &
+#             (df_food["태그리스트"].apply(lambda lst: tag in _parse_taglist_cell(lst)))
+#         ]
+#         foods = pool["식품"].dropna().astype(str).head(per_food).tolist()
+#         suggestions.append({
+#             "부족영양소": tag,
+#             "설명": nutrient_desc.get(tag, ""),
+#             "추천식품": foods
+#         })
+
+#     combo = []
+#     for s in suggestions:
+#         for f in s["추천식품"]:
+#             if f not in combo:
+#                 combo.append(f)
+#             if len(combo) >= 4:
+#                 break
+#         if len(combo) >= 4:
+#             break
+
+#     return suggestions, combo
+
+# ========= 개선된 다음 식사 제안 =========
+def _tag_deficits(nutrient_counts: Dict[str, float],
+                  tag_universe: List[str],
+                  tag_targets: Dict[str, float] | None = None) -> Dict[str, float]:
+    """태그별 부족량(>0) 계산"""
+    tag_targets = tag_targets or {}
+    deficits = {}
+    for t in tag_universe:
+        target = float(tag_targets.get(t, 1.0))  # 기본 목표 = 1
+        cur = float(nutrient_counts.get(t, 0.0))
+        lack = max(0.0, target - cur)
+        if lack > 0:
+            deficits[t] = lack
+    return deficits
+
+
+def _food_score(tags: list[str],
+                deficits: Dict[str, float],
+                grade: str,
+                prefer_tags: set[str],
+                avoid_tags: set[str],
+                grade_weights: dict[str, float]) -> float:
+    """후보 식품의 점수: 부족 채움 가중치 × 등급 가중치 - 패널티"""
+    if not tags:
+        return 0.0
+
+    # 채워주는 양(부족 태그 합)
+    gain = sum(deficits.get(t, 0.0) for t in tags)
+
+    # 등급 가중치 (Safe=1.0, Caution=0.6, Avoid=0)
+    gw = grade_weights.get(grade, 0.0)
+    score = gain * gw
+
+    # 선호/회피 태그 가중(작게)
+    if prefer_tags:
+        score += 0.1 * sum(1.0 for t in tags if t in prefer_tags)
+    if avoid_tags:
+        score -= 0.2 * sum(1.0 for t in tags if t in avoid_tags)
+
+    return score
+
+
+def recommend_next_meal(nutrient_counts: Dict[str, float],
+                        df_food: pd.DataFrame,
+                        nutrient_desc: Dict[str, str],
+                        *,
+                        # 옵션 파라미터(필요 시 바꾸기)
+                        tag_targets: Dict[str, float] | None = None,   # 태그별 목표치 (기본 1.0)
+                        prefer_tags: list[str] | None = None,         # 선호 태그 (예: ['단백질','식이섬유'])
+                        avoid_tags: list[str] | None = None,          # 회피 태그 (예: ['당','탄수화물'])
+                        allowed_grades: tuple[str, ...] = ('Safe','Caution'),  # 제안 허용 등급
+                        grade_weights: dict[str, float] = None,       # 등급 가중치
+                        top_nutrients: int = 3,       # 상위 부족 태그 n개만 집중
+                        per_food: int = 6,            # 태그별 최대 후보 노출
+                        max_items: int = 4            # 제안 묶음 길이(최대 몇 가지 조합?)
+                        ):
+    """
+    개선 포인트
+      - 태그별 목표치 대비 '부족량'을 계산하고 그 부족을 가장 잘 메우는 식품을 고름
+      - Safe 우선, Caution은 패널티, Avoid는 기본적으로 제외
+      - 선호/회피 태그 반영(소폭 가중)
+      - 그리디로 서로 다른 태그를 최대한 커버하는 1~max_items 조합 생성
+    반환: (부족태그별 추천 테이블, 제안 조합 리스트)
+    """
+    prefer_tags = set(prefer_tags or [])
+    avoid_tags = set(avoid_tags or [])
+    if grade_weights is None:
+        grade_weights = {'Safe': 1.0, 'Caution': 0.6, 'Avoid': 0.0}
+
+    # 태그 우주 & 부족량
+    tag_universe = sorted({t for lst in df_food["태그리스트"].apply(_parse_taglist_cell) for t in lst})
+    if not tag_universe:
+        return [], []
+
+    deficits_all = _tag_deficits(nutrient_counts, tag_universe, tag_targets)
+    if not deficits_all:
+        return [], []  # 이미 목표 충족
+
+    # 상위 부족 태그만 집중
+    lacking_sorted = sorted(deficits_all.items(), key=lambda x: x[1], reverse=True)
+    focus_tags = {t for t, _ in lacking_sorted[:max(1, top_nutrients)]}
+
+    # 후보 풀: 허용 등급만, 태그가 하나라도 focus 태그에 걸리는 식품
+    cand = df_food[df_food["등급"].isin(allowed_grades)].copy()
+    cand["태그리스트"] = cand["태그리스트"].apply(_parse_taglist_cell)
+    cand = cand[cand["태그리스트"].apply(lambda lst: any(t in focus_tags for t in lst))]
+
+    if cand.empty:
+        return [], []
+
+    # 식품별 점수 계산
+    cand["__score"] = cand.apply(
+        lambda r: _food_score(
+            r["태그리스트"],
+            deficits_all,
+            str(r["등급"]),
+            prefer_tags,
+            avoid_tags,
+            grade_weights
+        ), axis=1
+    )
+
+    cand = cand.sort_values("__score", ascending=False)
+
+    # 부족 태그별 top 후보 뽑아 설명용 테이블 구성
     suggestions = []
-    for tag in lacking:
-        pool = df_food[
-            (df_food["등급"] == "Safe") &
-            (df_food["태그리스트"].apply(lambda lst: tag in _parse_taglist_cell(lst)))
-        ]
-        foods = pool["식품"].dropna().astype(str).head(per_food).tolist()
+    for tag in sorted(focus_tags, key=lambda t: deficits_all[t], reverse=True):
+        pool = cand[cand["태그리스트"].apply(lambda lst: tag in lst)]
+        foods = pool["식품"].head(per_food).tolist()
         suggestions.append({
             "부족영양소": tag,
             "설명": nutrient_desc.get(tag, ""),
             "추천식품": foods
         })
 
-    combo = []
-    for s in suggestions:
-        for f in s["추천식품"]:
-            if f not in combo:
-                combo.append(f)
-            if len(combo) >= 4:
-                break
-        if len(combo) >= 4:
+    # 그리디 조합: 점수 높은 순으로 뽑되, '아직 부족한 태그'를 더 많이 채우는 아이를 우선
+    remaining = deficits_all.copy()
+    picked = []
+    for _, row in cand.iterrows():
+        if len(picked) >= max_items:
             break
+        tags = row["태그리스트"]
+        # 이 식품이 남아있는 부족을 실질적으로 줄이는가?
+        gain = sum(remaining.get(t, 0.0) for t in tags)
+        if gain <= 0:
+            continue
+        picked.append(str(row["식품"]))
+        # 남은 부족 업데이트 (한 번 선택 시 해당 태그 부족을 최대 1.0만큼만 줄인다고 가정)
+        for t in tags:
+            if t in remaining:
+                remaining[t] = max(0.0, remaining[t] - 1.0)
 
-    return suggestions, combo
+    return suggestions, picked[:max_items]
 
 
 def append_unmatched_to_food_db(df_food: pd.DataFrame, unmatched_names: List[str]) -> pd.DataFrame:
