@@ -6,6 +6,9 @@ import pandas as pd
 import re
 from collections import defaultdict
 
+# ---- Streamlit 섹션 (앱 어딘가에 추가) ----
+import streamlit as st
+
 # --- 설정: 파일 경로 (앱의 기존 경로를 쓰고 싶다면 아래 두 변수를 바꿔 주세요)
 FOOD_DB_CSV = "/mnt/data/food_db.csv"          # 예시 경로
 NUTRIENT_DICT_CSV = "/mnt/data/nutrient_dict.csv"
@@ -147,3 +150,38 @@ def recommend_next_meal(nutrient_counts: dict, df_food: pd.DataFrame, nutrient_d
             break
 
     return suggestions, combo
+
+st.markdown("### 🔎 간단 분석 & 다음 식사 제안")
+user_input = st.text_area("식단 텍스트 (쉼표/줄바꿈 구분)", height=90, placeholder="예: 소고기 미역국, 현미밥, 연어구이")
+
+if st.button("분석하기", type="primary"):
+    try:
+        items_df, nutrient_df, counts = analyze_diet(user_input, FOOD_DB_SIMPLE, NUTRIENT_DESC, threshold=1)
+
+        st.markdown("**🍱 항목별 매칭 결과**")
+        if items_df.empty:
+            st.info("매칭된 항목이 없습니다.")
+        else:
+            st.dataframe(items_df, use_container_width=True, height=min(300, 36*(len(items_df)+1)))
+
+        st.markdown("**🧭 영양 태그 요약** (충족/부족 + 한줄설명)")
+        if nutrient_df.empty:
+            st.info("영양소 사전(nutrient_dict.csv) 또는 태그 정보가 비어 있습니다.")
+        else:
+            st.dataframe(nutrient_df, use_container_width=True, height=min(360, 36*(len(nutrient_df)+1)))
+
+        st.markdown("**🍽 다음 식사 제안** (부족 영양소 보완)")
+        recs, combo = recommend_next_meal(counts, FOOD_DB_SIMPLE, NUTRIENT_DESC, top_nutrients=2, per_food=4)
+
+        if not recs:
+            st.success("핵심 부족 영양소가 없습니다. 균형 잘 맞았어요!")
+        else:
+            for r in recs:
+                foods_text = ", ".join(r["추천식품"]) if r["추천식품"] else "(추천 식품 없음)"
+                st.write(f"- **{r['부족영양소']}**: {r['설명']}")
+                st.caption(f"  추천 식품: {foods_text}")
+            if combo:
+                st.info("간단 조합 제안: " + " / ".join(combo[:4]))
+    except Exception as e:
+        st.error(f"분석 중 오류: {e}")
+
