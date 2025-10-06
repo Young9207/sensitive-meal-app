@@ -32,7 +32,6 @@ SUPP_ALERT_KEYWORDS = {
     "corn": ("Caution","옥수수 경계: 폴렌타/콘가공품 주의"),
 }
 
-# ------- 자유입력 키워드 & 가상 매핑 --------
 KEYWORD_MAP = {
     "블랙커피": "커피", "커피": "커피",
     "녹차": "녹차", "홍차": "홍차",
@@ -51,7 +50,6 @@ VIRTUAL_RULES = {
     "__VIRTUAL_BROWN_RICE__": {"grade":"Avoid","flags":"개인 회피: 현미","tags":["ComplexCarb"]},
 }
 
-# ---------- 개인 규칙 ----------
 def load_user_rules():
     defaults = {"avoid_keywords": ["현미","현미밥","brown rice"], "allow_keywords": ["커피"]}
     if os.path.exists(USER_RULES_PATH):
@@ -69,15 +67,17 @@ def save_user_rules(rules: dict):
     with open(USER_RULES_PATH, "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
 
-# ---------- I/O ----------
 def ensure_log():
     cols = ["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]
     try:
+        if not os.path.exists(LOG_PATH):
+            pd.DataFrame(columns=cols).to_csv(LOG_PATH, index=False)
         log = pd.read_csv(LOG_PATH)
         for c in cols:
             if c not in log.columns:
-                log[c] = "" if c not in ["qty"] else 0
+                log[c] = "" if c != "qty" else 0
         log = log[cols]
+        log.to_csv(LOG_PATH, index=False)
         return log
     except Exception:
         log = pd.DataFrame(columns=cols)
@@ -85,8 +85,9 @@ def ensure_log():
         return log
 
 def load_food_db():
-    # 없더라도 최소 스키마로 생성
     try:
+        if not os.path.exists(FOOD_DB_PATH):
+            pd.DataFrame(columns=["식품","식품군","등급","태그(영양)"]).to_csv(FOOD_DB_PATH, index=False)
         df = pd.read_csv(FOOD_DB_PATH, encoding="utf-8", engine="python")
     except Exception:
         df = pd.DataFrame(columns=["식품","식품군","등급","태그(영양)"])
@@ -100,10 +101,8 @@ def load_food_db():
         df["태그(영양)"] = df["태그(영양)"].apply(parse_tags)
     else:
         df["태그(영양)"] = [[] for _ in range(len(df))]
-    if "등급" not in df.columns:
-        df["등급"] = "Safe"
-    if "식품군" not in df.columns:
-        df["식품군"] = ""
+    if "등급" not in df.columns: df["등급"] = "Safe"
+    if "식품군" not in df.columns: df["식품군"] = ""
     return df
 
 def save_food_db(df: pd.DataFrame):
@@ -141,7 +140,7 @@ def add_log_row(log, date_str, t_str, slot, typ, item, qty, food_norm, grade, fl
     log.to_csv(LOG_PATH, index=False)
     return log
 
-# --------- 자유입력 파싱 ---------
+# --------- 자유입력 파싱 유틸 ---------
 def split_free_text(s: str):
     if not s: return []
     extra = []
@@ -219,7 +218,6 @@ def log_free_foods(log, when_date, when_time, slot, memo, food_db, user_rules):
         saved.append((name_raw, qty))
     return log, saved
 
-# ---------- 점수 ----------
 def score_day(df_log, df_food, date_str):
     day = df_log[(df_log["date"]==date_str) & (df_log["type"]=="food")]
     score = {k:0.0 for k in CORE_NUTRIENTS}
@@ -239,8 +237,6 @@ def score_day(df_log, df_food, date_str):
             if t in score: score[t] += qty
     return score
 
-# ---------- 현실형 PANTRY (fallback) ----------
-# 흔히 구하는 식재료(유제품/글루텐/옥수수/콩류 과민 고려, 생선/육류/채소/과일/탄수/지방)
 PANTRY = {
     "protein": ["대구","연어","닭가슴살","돼지고기","소고기","계란(알레르기 없을 때)"],
     "veg": ["양배추","당근","브로콜리","애호박","오이","시금치","상추","무"],
@@ -250,29 +246,25 @@ PANTRY = {
 }
 
 def build_baskets(df, include_caution=False):
-    # 1) FoodDB에서 Safe/경계 추출
     pool = df.copy()
     pool = pool[pool["등급"].isin(["Safe","Caution"])] if include_caution else pool[pool["등급"]=="Safe"]
-    def pick(col, cond):
-        try:
-            return pool[cond]["식품"].tolist()
-        except Exception:
-            return []
-    proteins = pick("식품", (pool["식품군"].isin(["생선/해산물","육류"])) & (pool["태그(영양)"].apply(lambda t: "Protein" in t)))
-    vegs = pick("식품", (pool["식품군"]=="채소") & (pool["태그(영양)"].apply(lambda t: "Fiber" in t)))
-    carbs = pick("식품", (pool["태그(영양)"].apply(lambda t: "ComplexCarb" in t)))
-    fats = pick("식품", (pool["태그(영양)"].apply(lambda t: "HealthyFat" in t)))
-    fruits = pick("식품", (pool["식품군"]=="과일"))
-    # 2) 부족하면 PANTRY로 보충
+    def pick(cond):
+        try: return pool[cond]["식품"].tolist()
+        except Exception: return []
+    proteins = pick((pool["식품군"].isin(["생선/해산물","육류"])) & (pool["태그(영양)"].apply(lambda t: "Protein" in t)))
+    vegs = pick((pool["식품군"]=="채소") & (pool["태그(영양)"].apply(lambda t: "Fiber" in t)))
+    carbs = pick((pool["태그(영양)"].apply(lambda t: "ComplexCarb" in t)))
+    fats = pick((pool["태그(영양)"].apply(lambda t: "HealthyFat" in t)))
+    fruits = pick((pool["식품군"]=="과일"))
     def ensure(lst, pantry_list):
-        s = list(dict.fromkeys(lst + [x for x in pantry_list if x not in lst]))
-        return s
-    proteins = ensure(proteins, PANTRY["protein"])
-    vegs     = ensure(vegs, PANTRY["veg"])
-    carbs    = ensure(carbs, PANTRY["carb"])
-    fats     = ensure(fats, PANTRY["fat"])
-    fruits   = ensure(fruits, PANTRY["fruit"])
-    return {"protein":proteins, "veg":vegs, "carb":carbs, "fat":fats, "fruit":fruits}
+        return list(dict.fromkeys(lst + [x for x in pantry_list if x not in lst]))
+    return {
+        "protein": ensure(proteins, PANTRY["protein"]),
+        "veg": ensure(vegs, PANTRY["veg"]),
+        "carb": ensure(carbs, PANTRY["carb"]),
+        "fat": ensure(fats, PANTRY["fat"]),
+        "fruit": ensure(fruits, PANTRY["fruit"]),
+    }
 
 def mode_filters(mode, user_rules):
     avoid_keywords = []
@@ -340,20 +332,18 @@ def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user
             tags = recs.iloc[0]["태그(영양)"] if not recs.empty else []
             score = sum(1 for t in local_favor if t in tags)
             scored.append((score, name))
-        scored.sort(key=lambda x: (-x[0], rng.random()))
+        scored.sort(key=lambda x: (-x[0], random.random()))
         return [n for _, n in scored]
     for key in baskets.keys():
         baskets[key] = favor(baskets[key])
     meal = []
     for key, need in comp.items():
-        chosen = pick_diverse(baskets[key], recent_items, need, rng)
+        chosen = pick_diverse(baskets[key], recent_items, need, random)
         meal += chosen
-    # 현실형 포맷: 타이틀 + 아이템
     title = build_meal_title(mode, meal)
     return title, meal
 
 def build_meal_title(mode, items):
-    # 간단 제목 생성: 주단백 + 보조
     if not items: return f"{mode} 제안"
     proteins = [x for x in items if any(k in x for k in ["대구","연어","닭","소고기","돼지고기","계란"])]
     main = proteins[0] if proteins else items[0]
@@ -363,8 +353,7 @@ def supplement_flag(text):
     if not text: return ("","")
     t = text.lower()
     for key, (grade,msg) in SUPP_ALERT_KEYWORDS.items():
-        if key in t:
-            return (grade, msg)
+        if key in t: return (grade, msg)
     return ("","")
 
 # ---------- 앱 ----------
@@ -374,11 +363,11 @@ user_rules = load_user_rules()
 
 st.title("🥣 민감도 식사 로그 • 현실형 제안")
 
-# 사이드바: 개인 규칙
 with st.sidebar:
     st.subheader("개인 규칙")
     avoid_str = st.text_input("회피 키워드(쉼표)", value=", ".join(user_rules.get("avoid_keywords", [])))
     allow_str = st.text_input("허용 키워드(쉼표)", value=", ".join(user_rules.get("allow_keywords", [])))
+    debug = st.checkbox("디버그 정보 표시", value=False)
     if st.button("규칙 저장"):
         user_rules["avoid_keywords"] = [s.strip() for s in avoid_str.split(",") if s.strip()]
         user_rules["allow_keywords"] = [s.strip() for s in allow_str.split(",") if s.strip()]
@@ -396,133 +385,179 @@ with tab1:
     if typ=="food":
         memo = st.text_area("메모 한 줄로 입력", height=100, placeholder="예: 쌀밥1, 대구구이1, 양배추찜1, 당근1, 올리브유0.5")
         if st.button("➕ 파싱해서 모두 저장", type="primary"):
-            ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
-            log, saved = log_free_foods(log, ds, ts, slot, memo, food_db, user_rules)
-            st.success(f"{len(saved)}개 항목 저장: " + ", ".join([f"{n}×{q}" for n,q in saved]))
+            try:
+                ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
+                log, saved = log_free_foods(log, ds, ts, slot, memo, food_db, user_rules)
+                st.success(f"{len(saved)}개 항목 저장: " + ", ".join([f"{n}×{q}" for n,q in saved]))
+            except Exception as e:
+                st.error("파싱/저장 중 오류가 발생했습니다.")
+                if debug: st.exception(e)
     elif typ=="supplement":
         text = st.text_area("보충제/약/음료", height=80)
         g, flags = supplement_flag(text)
         if g=="Avoid": st.error(flags or "주의 보충제")
         elif g=="Caution": st.warning(flags or "경계 보충제")
         if st.button("➕ 저장", type="primary"):
-            ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
-            log = add_log_row(log, ds, ts, slot, "supplement", text, 1.0, "", g, flags, [], source="manual")
-            st.success("저장되었습니다.")
+            try:
+                ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
+                log = add_log_row(log, ds, ts, slot, "supplement", text, 1.0, "", g, flags, [], source="manual")
+                st.success("저장되었습니다.")
+            except Exception as e:
+                st.error("저장 중 오류가 발생했습니다.")
+                if debug: st.exception(e)
     else:
         text = st.text_area("증상(예: 속쓰림2, 더부룩1)", height=80)
         if st.button("➕ 저장", type="primary"):
-            ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
-            log = add_log_row(log, ds, ts, slot, "symptom", text, 1.0, "", "", "", [], source="manual")
-            st.success("저장되었습니다.")
+            try:
+                ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
+                log = add_log_row(log, ds, ts, slot, "symptom", text, 1.0, "", "", "", [], source="manual")
+                st.success("저장되었습니다.")
+            except Exception as e:
+                st.error("저장 중 오류가 발생했습니다.")
+                if debug: st.exception(e)
     st.markdown("---")
     st.caption("최근 기록")
-    st.dataframe(log.sort_values(['date','time']).tail(20), use_container_width=True, height=240)
+    try:
+        st.dataframe(log.sort_values(['date','time']).tail(20), use_container_width=True, height=240)
+    except Exception as e:
+        st.error("최근 기록 표시 중 오류")
+        if debug: st.exception(e)
 
 with tab2:
     st.subheader("요약 & 다음 끼니 제안(3가지)")
     dsum = st.date_input("기준 날짜", value=date.today(), key="sumdate_2")
     date_str = dsum.strftime("%Y-%m-%d")
-    scores = score_day(log, food_db, date_str)
-    score_df = pd.DataFrame([scores]).T.reset_index()
-    score_df.columns = ["영양소","점수"]
-    st.dataframe(score_df, use_container_width=True, height=260)
+    try:
+        scores = score_day(log, food_db, date_str)
+        score_df = pd.DataFrame([scores]).T.reset_index()
+        score_df.columns = ["영양소","점수"]
+        st.dataframe(score_df, use_container_width=True, height=260)
+    except Exception as e:
+        st.error("점수 계산 중 오류")
+        if debug: st.exception(e)
 
-    # 부족 태그
-    favor_tags = [n for n in ESSENTIALS if scores.get(n,0)<1]
+    favor_tags = [n for n in ESSENTIALS if scores.get(n,0)<1] if 'scores' in locals() else []
     include_caution = st.checkbox("경계(Caution) 포함", value=False)
     diversity_n = st.slider("다양화(최근 N회 중복 회피)", min_value=0, max_value=10, value=5, step=1)
-    # 최근 중복 회피
     recent_items = []
-    if diversity_n>0:
-        recent_df = log[log["type"]=="food"].sort_values(["date","time"]).tail(diversity_n*5)
-        recent_items = (recent_df["food_norm"].fillna("") + "|" + recent_df["item"].fillna("")).tolist()
-        recent_items = [x.split("|")[0] for x in recent_items if x]
-    # 모드 선택
+    try:
+        if diversity_n>0:
+            recent_df = log[log["type"]=="food"].sort_values(["date","time"]).tail(diversity_n*5)
+            recent_items = (recent_df["food_norm"].fillna("") + "|" + recent_df["item"].fillna("")).tolist()
+            recent_items = [x.split("|")[0] for x in recent_items if x]
+    except Exception as e:
+        if debug: st.exception(e)
+
     mode = st.selectbox("제안 모드", SUGGEST_MODES, index=0)
     rng = random.Random(int(time.time()) % 10**9)
 
     cols = st.columns(3)
     for idx in range(3):
-        title, meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, rng, user_rules)
-        with cols[idx]:
-            st.markdown(f"**{title}**")
-            if meal:
-                st.write("• " + " / ".join(meal))
-                if favor_tags: st.caption("부족 보완 우선 태그: " + ", ".join(favor_tags))
-                # 저장 버튼
-                if st.button(f"💾 이 조합 저장 (점심) — {idx+1}"):
-                    now = datetime.now().strftime("%H:%M")
-                    for token in meal:
-                        # DB에 없더라도 그대로 기록 (food_norm은 그대로)
-                        grade=""; tags=[]
-                        rec = food_db[food_db["식품"]==token]
-                        if not rec.empty:
-                            grade = rec.iloc[0].get("등급","Safe"); tags = rec.iloc[0].get("태그(영양)",[])
-                        add_log_row(log, date_str, now, "점심", "food", token, 1.0, token, grade, "", tags, source="suggested")
-                    st.success("저장 완료! 기록 탭에서 확인하세요.")
-            else:
-                st.info("조건을 만족하는 식품 풀이 부족합니다. 개인 회피리스트 또는 FoodDB를 확인하세요.")
+        try:
+            title, meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, rng, load_user_rules())
+            with cols[idx]:
+                st.markdown(f"**{title}**")
+                if meal:
+                    st.write("• " + " / ".join(meal))
+                    if favor_tags: st.caption("부족 보완 우선 태그: " + ", ".join(favor_tags))
+                    if st.button(f"💾 이 조합 저장 (점심) — {idx+1}"):
+                        now = datetime.now().strftime("%H:%M")
+                        for token in meal:
+                            grade=""; tags=[]
+                            rec = food_db[food_db["식품"]==token]
+                            if not rec.empty:
+                                grade = rec.iloc[0].get("등급","Safe"); tags = rec.iloc[0].get("태그(영양)",[])
+                            add_log_row(log, date_str, now, "점심", "food", token, 1.0, token, grade, "", tags, source="suggested")
+                        st.success("저장 완료! 기록 탭에서 확인하세요.")
+                else:
+                    st.info("조건을 만족하는 식품 풀이 부족합니다. 개인 회피리스트 또는 FoodDB를 확인하세요.")
+        except Exception as e:
+            with cols[idx]:
+                st.error("제안 생성 중 오류")
+                if debug: st.exception(e)
 
 with tab3:
     st.subheader("내보내기/백업")
-    with open(LOG_PATH, "rb") as f:
-        st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
-    with open(FOOD_DB_PATH, "rb") as f:
-        st.download_button("⬇️ food_db.csv 다운로드", data=f, file_name="food_db.csv", mime="text/csv")
-    if os.path.exists(USER_RULES_PATH):
-        with open(USER_RULES_PATH, "rb") as f:
-            st.download_button("⬇️ user_rules.json 다운로드", data=f, file_name="user_rules.json", mime="application/json")
-    # ZIP 백업
-    if st.button("📦 전체 백업 ZIP 만들기"):
-        mem_zip = io.BytesIO()
-        with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for p in [LOG_PATH, FOOD_DB_PATH, USER_RULES_PATH]:
-                if os.path.exists(p):
-                    with open(p, "rb") as f:
-                        zf.writestr(os.path.basename(p), f.read())
-        mem_zip.seek(0)
-        st.download_button("⬇️ 백업 ZIP 다운로드", data=mem_zip, file_name="meal_app_backup.zip", mime="application/zip")
+    try:
+        with open(LOG_PATH, "rb") as f:
+            st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
+        with open(FOOD_DB_PATH, "rb") as f:
+            st.download_button("⬇️ food_db.csv 다운로드", data=f, file_name="food_db.csv", mime="text/csv")
+        if os.path.exists(USER_RULES_PATH):
+            with open(USER_RULES_PATH, "rb") as f:
+                st.download_button("⬇️ user_rules.json 다운로드", data=f, file_name="user_rules.json", mime="application/json")
+        if st.button("📦 전체 백업 ZIP 만들기"):
+            mem_zip = io.BytesIO()
+            with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for p in [LOG_PATH, FOOD_DB_PATH, USER_RULES_PATH]:
+                    if os.path.exists(p):
+                        with open(p, "rb") as f:
+                            zf.writestr(os.path.basename(p), f.read())
+            mem_zip.seek(0)
+            st.download_button("⬇️ 백업 ZIP 다운로드", data=mem_zip, file_name="meal_app_backup.zip", mime="application/zip")
+    except Exception as e:
+        st.error("내보내기 중 오류")
+        if debug: st.exception(e)
 
 with tab4:
     st.subheader("🛠 기록/DB 편집")
-    # 로그 편집
     min_d = st.date_input("시작일", value=date.today())
     max_d = st.date_input("종료일", value=date.today())
-    df = pd.read_csv(LOG_PATH)
+    try:
+        df = pd.read_csv(LOG_PATH)
+    except Exception:
+        df = pd.DataFrame(columns=["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"])
+        df.to_csv(LOG_PATH, index=False)
     if not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        mask = (df["date"]>=min_d) & (df["date"]<=max_d)
-        view = df[mask].copy().reset_index(drop=True)
-        st.caption("셀 수정 후 '변경 저장'을 눌러 반영하세요.")
-        edited = st.data_editor(view, num_rows="dynamic", use_container_width=True, key="edit_log")
-        c1,c2 = st.columns(2)
-        with c1:
-            if st.button("변경 저장"):
-                df.loc[mask, :] = edited.values
-                df["date"] = df["date"].astype(str)
-                df.to_csv(LOG_PATH, index=False)
-                st.success("로그 저장됨.")
-        with c2:
-            del_idx = st.multiselect("삭제할 행(뷰 인덱스)", options=list(range(len(view))))
-            if st.button("선택 행 삭제"):
-                to_drop = df[mask].iloc[del_idx].index
-                df = df.drop(index=to_drop).reset_index(drop=True)
-                df.to_csv(LOG_PATH, index=False)
-                st.success(f"{len(del_idx)}개 행 삭제됨.")
+        try:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            mask = (df["date"]>=min_d) & (df["date"]<=max_d)
+            view = df[mask].copy()
+            view = view.reset_index()  # keep original index for mapping back
+            st.caption("셀 수정 후 '변경 저장'을 눌러 반영하세요.")
+            edited = st.data_editor(view.drop(columns=["index"]), num_rows="dynamic", use_container_width=True, key="edit_log")
+            c1,c2 = st.columns(2)
+            with c1:
+                if st.button("변경 저장"):
+                    try:
+                        # map back to original df indices
+                        if len(edited) == len(view):
+                            df.loc[view["index"], edited.columns] = edited.values
+                            df["date"] = df["date"].astype(str)
+                            df.to_csv(LOG_PATH, index=False)
+                            st.success("로그 저장됨.")
+                        else:
+                            st.error("편집 행 수가 변경되어 저장할 수 없습니다. 행 추가/삭제는 별도 기능을 사용하세요.")
+                    except Exception as e:
+                        st.error("로그 저장 중 오류")
+                        if debug: st.exception(e)
+            with c2:
+                del_idx = st.multiselect("삭제할 행(뷰 인덱스)", options=list(range(len(view))))
+                if st.button("선택 행 삭제"):
+                    try:
+                        to_drop = view.iloc[del_idx]["index"].tolist()
+                        df = df.drop(index=to_drop).reset_index(drop=True)
+                        df.to_csv(LOG_PATH, index=False)
+                        st.success(f"{len(del_idx)}개 행 삭제됨.")
+                    except Exception as e:
+                        st.error("행 삭제 중 오류")
+                        if debug: st.exception(e)
     else:
         st.info("아직 로그가 없습니다.")
 
     st.markdown("---")
-    # FoodDB 편집
     fdb = load_food_db()
     st.caption("태그(영양)은 JSON 배열 권장 예) [\"Protein\",\"Fiber\"].")
     fdb_edit = st.data_editor(fdb, num_rows="dynamic", use_container_width=True, key="edit_fooddb")
     if st.button("FoodDB 저장"):
-        save_food_db(fdb_edit.copy())
-        st.success("FoodDB 저장됨.")
+        try:
+            save_food_db(fdb_edit.copy())
+            st.success("FoodDB 저장됨.")
+        except Exception as e:
+            st.error("FoodDB 저장 중 오류")
+            if debug: st.exception(e)
 
     st.markdown("---")
-    # user_rules 가져오기
     uploaded = st.file_uploader("user_rules.json 업로드(덮어쓰기)", type=["json"])
     if uploaded is not None:
         try:
