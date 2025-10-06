@@ -77,7 +77,7 @@ def split_items(text: str) -> List[str]:
     """쉼표(,)와 줄바꿈으로 먼저 분리한 뒤, 각 토큰을 '+'로 추가 분리"""
     if not text:
         return []
-    first = [p.strip() for p in re.split(r"[,|\n]+", text) if p.strip()]
+    first = [p.strip() for p in re.split(r"[,|\n|(|)]+", text) if p.strip()]
     final = []
     for part in first:
         final += [q.strip() for q in part.split('+') if q.strip()]
