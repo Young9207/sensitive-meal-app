@@ -537,7 +537,18 @@ def main():
                 st.dataframe(nutri_df, use_container_width=True, height=min(420, 36 * (len(nutri_df) + 1)))
 
             st.markdown("### 🍽 다음 식사 제안 (부족 보완용)")
-            recs, combo = recommend_next_meal(dict(total_counts), df_food, nutrient_desc, top_nutrients=2, per_food=4)
+            # recs, combo = recommend_next_meal(dict(total_counts), df_food, nutrient_desc, top_nutrients=2, per_food=4)
+            recs, combo = recommend_next_meal(    
+             dict(total_counts), df_food, nutrient_desc,
+              # 아래 옵션은 필요 시 활성화
+              # tag_targets={'단백질': 2, '식이섬유': 2},     # 목표 상향
+              # prefer_tags=['식이섬유','단백질'],            # 선호 태그
+              # avoid_tags=['당','탄수화물'],                 # 회피 태그(당뇨 고려)
+              # allowed_grades=('Safe','Caution'),          # Avoid 제외
+              # max_items=4
+           )
+
+            
             if not recs:
                 st.success("핵심 부족 영양소가 없습니다. 균형이 잘 맞았어요!")
             else:
