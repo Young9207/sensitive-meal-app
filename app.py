@@ -6,6 +6,16 @@ from datetime import date, time as dtime, datetime
 
 st.set_page_config(page_title="민감도 식사 로그 • 현실형 제안 (안정화)", page_icon="🥣", layout="wide")
 
+def _force_rerun():
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+
+
 FOOD_DB_PATH = "food_db.csv"
 LOG_PATH = "log.csv"
 USER_RULES_PATH = "user_rules.json"
@@ -266,6 +276,60 @@ def score_day(df_log, df_food, date_str):
     return score
 
 # ---------- 현실형 PANTRY
+
+# --- Mode-specific anchor food pools (clearly different per condition) ---
+MODE_ANCHORS = {
+    "기본": {
+        "protein": ["닭가슴살","연어","대구","돼지고기"],
+        "veg": ["양배추","당근","브로콜리","애호박","오이","시금치"],
+        "carb": ["쌀밥","고구마","감자","퀴노아","타피오카"],
+        "fat": ["올리브유","들기름"],
+        "fruit": ["사과","바나나","키위"]
+    },
+    "달다구리(당김)": {
+        "protein": ["닭가슴살","대구"],
+        "veg": ["오이","시금치","당근"],
+        "carb": ["퀴노아","타피오카"],  # 급격혈당 피하기
+        "fat": ["올리브유","아보카도(가능시)"],
+        "fruit": ["블루베리","딸기","사과"]
+    },
+    "역류": {
+        "protein": ["대구","닭가슴살"],
+        "veg": ["오이","애호박","시금치","당근"],
+        "carb": ["쌀죽","쌀밥","감자"],  # 부드러운 탄수화물
+        "fat": ["올리브유"],
+        "fruit": ["바나나","사과"]
+    },
+    "더부룩": {
+        "protein": ["대구","닭가슴살"],
+        "veg": ["오이","애호박","시금치","당근"],  # 저 FODMAP 위주
+        "carb": ["쌀밥","감자","타피오카"],
+        "fat": ["올리브유"],
+        "fruit": ["바나나","키위"]
+    },
+    "붓기": {
+        "protein": ["대구","닭가슴살","연어"],
+        "veg": ["오이","시금치","당근"],
+        "carb": ["고구마","감자","퀴노아"],
+        "fat": ["올리브유"],
+        "fruit": ["바나나","키위"]  # 칼륨
+    },
+    "피곤함": {
+        "protein": ["소고기","돼지고기","연어"],  # 철/비타민B, 오메가3
+        "veg": ["시금치","브로콜리","양배추"],
+        "carb": ["고구마","퀴노아","쌀밥"],
+        "fat": ["올리브유","들기름"],
+        "fruit": ["키위","오렌지(허용시)","사과"]
+    },
+    "변비": {
+        "protein": ["연어","닭가슴살"],
+        "veg": ["양배추","브로콜리","시금치","당근"],
+        "carb": ["퀴노아","고구마","쌀밥"],
+        "fat": ["올리브유","들기름","참깨"],
+        "fruit": ["키위","사과","바나나"]
+    }
+}
+
 PANTRY = {
     "protein": ["대구","연어","닭가슴살","돼지고기","소고기","계란(알레르기 없을 때)"],
     "veg": ["양배추","당근","브로콜리","애호박","오이","시금치","상추","무"],
@@ -296,38 +360,46 @@ def build_baskets(df, include_caution=False):
     }
 
 def mode_filters(mode, user_rules):
+    """Return (avoid_keywords, composition, favor_tags, human_avoid_note)"""
     avoid_keywords = []
     comp = {"protein":1,"veg":2,"carb":1,"fat":1,"fruit":0}
     favor = []
+    note = []
     if mode=="기본":
         pass
     elif mode=="달다구리(당김)":
+        note += ["정제당/디저트류 제외"]
         comp = {"protein":1,"veg":1,"carb":0,"fat":1,"fruit":1}
         avoid_keywords += ["초콜릿","케이크","크림","튀김"]
         favor += ["C","Fiber","K_potassium","HealthyFat"]
     elif mode=="역류":
+        note += ["시트러스/매운류/기름진 조리법 제외"]
         avoid_keywords += ["홍차","초콜릿","오렌지","레몬","라임","붉은 고추","스파이시","튀김","크림","토마토 소스"]
         if "커피" not in user_rules.get("allow_keywords", []):
             avoid_keywords += ["커피"]
         comp = {"protein":1,"veg":2,"carb":1,"fat":1}
         favor += ["LightProtein","Fiber"]
     elif mode=="더부룩":
+        note += ["고FODMAP 재료(양파/마늘/콩류/양배추/브로콜리) 제외"]
         avoid_keywords += ["양파","마늘","강낭콩","렌틸","완두","콩","브로콜리","양배추","붉은 양배추","우유","요거트","치즈"]
         comp = {"protein":1,"veg":2,"carb":1,"fat":1}
         favor += ["LightProtein","Fiber"]
     elif mode=="붓기":
+        note += ["염분/절임/가공육/간장 베이스 제외"]
         avoid_keywords += ["절임","젓갈","우메보시","김치","햄","베이컨","가공","스톡","간장"]
         comp = {"protein":1,"veg":2,"carb":1,"fat":1,"fruit":0}
         favor += ["K_potassium","Fiber","Hydration"]
     elif mode=="피곤함":
+        note += ["튀김/크림/과음 제외"]
         avoid_keywords += ["튀김","크림","과음"]
         comp = {"protein":1,"veg":2,"carb":1,"fat":1}
         favor += ["B","Fe","Mg","ComplexCarb"]
     elif mode=="변비":
+        note += ["유제품/튀김/저수분 식단 제외"]
         comp = {"protein":1,"veg":2,"carb":1,"fat":1,"fruit":1}
         avoid_keywords += ["치즈","크림","튀김"]
         favor += ["Fiber","Hydration","K_potassium","HealthyFat"]
-    return avoid_keywords, comp, favor
+    return avoid_keywords, comp, favor, ", ".join(note)
 
 def filter_keywords(items, kws):
     return [it for it in items if not any(k in it for k in kws)]
@@ -347,8 +419,13 @@ def pick_diverse(candidates, recent, need, rng):
     return pool + repeat_pool[:left]
 
 def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user_rules):
+    """Return (title, items, explain)
+    - items are built from MODE_ANCHORS[mode] prioritized, then general baskets
+    - explain shows what was avoided (mode note and personal rules)
+    """
     baskets = build_baskets(df_food, include_caution=include_caution)
-    avoid_kws, comp, favor_extra = mode_filters(mode, user_rules)
+    avoid_kws, comp, favor_extra, mode_note = mode_filters(mode, user_rules)
+    anchors = MODE_ANCHORS.get(mode, {})
     for k in list(baskets.keys()):
         baskets[k] = filter_keywords(baskets[k], avoid_kws)
         baskets[k] = filter_personal(baskets[k], user_rules)
@@ -364,13 +441,24 @@ def gen_meal(df_food, include_caution, mode, recent_items, favor_tags, rng, user
         scored.sort(key=lambda x: (-x[0], random.random()))
         return [n for _, n in scored]
     for key in baskets.keys():
-        baskets[key] = favor(baskets[key])
+        # Merge anchors (if exist) at the front to be prioritized
+        if key in anchors:
+            front = [x for x in anchors[key] if x in baskets[key]]
+            rest = [x for x in baskets[key] if x not in front]
+            baskets[key] = favor(front) + favor(rest)
+        else:
+            baskets[key] = favor(baskets[key])
     meal = []
     for key, need in comp.items():
         chosen = pick_diverse(baskets[key], recent_items, need, random)
         meal += chosen
     title = build_meal_title(mode, meal)
-    return title, meal
+    explain = mode_note
+    # Personal avoids surfaced
+    pa = user_rules.get("avoid_keywords", [])
+    if pa:
+        explain = (explain + " | 개인 회피: " + ", ".join(pa)).strip(' |')
+    return title, meal, explain
 
 def build_meal_title(mode, items):
     if not items: return f"{mode} 제안"
@@ -417,7 +505,7 @@ with tab1:
             try:
                 ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
                 log, saved = log_free_foods(log, ds, ts, slot, memo, food_db, user_rules)
-                st.success(f"{len(saved)}개 항목 저장: " + ", ".join([f"{n}×{q}" for n,q in saved]))
+                st.success(f"{len(saved)}개 항목 저장: " + ", ".join([f"{n}×{q}" for n,q in saved])); _force_rerun()
             except Exception as e:
                 st.error("파싱/저장 중 오류가 발생했습니다.")
                 if debug: st.exception(e)
@@ -430,7 +518,7 @@ with tab1:
             try:
                 ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
                 log = add_log_row(log, ds, ts, slot, "supplement", text, 1.0, "", g, flags, [], source="manual")
-                st.success("저장되었습니다.")
+                st.success("저장되었습니다."); _force_rerun()
             except Exception as e:
                 st.error("저장 중 오류가 발생했습니다.")
                 if debug: st.exception(e)
@@ -440,15 +528,15 @@ with tab1:
             try:
                 ds = d.strftime("%Y-%m-%d"); ts = t_input.strftime("%H:%M")
                 log = add_log_row(log, ds, ts, slot, "symptom", text, 1.0, "", "", "", [], source="manual")
-                st.success("저장되었습니다.")
+                st.success("저장되었습니다."); _force_rerun()
             except Exception as e:
                 st.error("저장 중 오류가 발생했습니다.")
                 if debug: st.exception(e)
     st.markdown("---")
     st.caption("최근 기록")
     try:
-        tmp = log.copy()
-        # sort by string to avoid dtype issues
+        fresh = ensure_log()
+        tmp = fresh.copy()
         tmp["date"] = tmp["date"].astype(str)
         tmp["time"] = tmp["time"].astype(str)
         st.dataframe(tmp.sort_values(['date','time']).tail(20), use_container_width=True, height=240)
@@ -475,7 +563,8 @@ with tab2:
     recent_items = []
     try:
         if diversity_n>0:
-            r = log[log["type"]=="food"].copy()
+            r = ensure_log()
+            r = r[r["type"]=="food"].copy()
             r["date"] = r["date"].astype(str)
             r["time"] = r["time"].astype(str)
             recent_df = r.sort_values(["date","time"]).tail(diversity_n*5)
@@ -485,6 +574,11 @@ with tab2:
         if debug: st.exception(e)
 
     mode = st.selectbox("제안 모드", SUGGEST_MODES, index=0)
+    if "suggest_seed" not in st.session_state:
+        st.session_state.suggest_seed = 0
+    if st.button("🔄 새로고침"):
+        st.session_state.suggest_seed += 1
+    rng = random.Random(hash((mode, st.session_state.suggest_seed)) % (10**9))
 
     cols = st.columns(3)
     for idx in range(3):
@@ -495,6 +589,8 @@ with tab2:
                 if meal:
                     st.write("• " + " / ".join(meal))
                     if favor_tags: st.caption("부족 보완 우선 태그: " + ", ".join(favor_tags))
+                    if explain:
+                        st.caption("모드 적용: " + explain)
                     if st.button(f"💾 이 조합 저장 (점심) — {idx+1}"):
                         now = datetime.now().strftime("%H:%M")
                         for token in meal:
@@ -516,9 +612,7 @@ with tab3:
     try:
         with open(LOG_PATH, "rb") as f:
             st.download_button("⬇️ log.csv 다운로드", data=f, file_name="log.csv", mime="text/csv")
-        with open(FOOD_DB_PATH, "rb") as f:
-            st.download_button("⬇️ food_db.csv 다운로드", data=f, file_name="food_db.csv", mime="text/csv")
-        if os.path.exists(USER_RULES_PATH):
+                if os.path.exists(USER_RULES_PATH):
             with open(USER_RULES_PATH, "rb") as f:
                 st.download_button("⬇️ user_rules.json 다운로드", data=f, file_name="user_rules.json", mime="application/json")
         if st.button("📦 전체 백업 ZIP 만들기"):
@@ -578,7 +672,7 @@ with tab4:
                         df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(1.0)
                         df["date"] = df["date"].astype(str)
                         df.to_csv(LOG_PATH, index=False)
-                        st.success("로그 저장됨.")
+                        st.success("로그 저장됨."); _force_rerun()
                     except Exception as e:
                         st.error("로그 저장 중 오류")
                         if debug: st.exception(e)
@@ -589,7 +683,7 @@ with tab4:
                         to_drop = view.iloc[del_idx]["index"].tolist()
                         df = df.drop(index=to_drop).reset_index(drop=True)
                         df.to_csv(LOG_PATH, index=False)
-                        st.success(f"{len(del_idx)}개 행 삭제됨.")
+                        st.success(f"{len(del_idx)}개 행 삭제됨."); _force_rerun()
                     except Exception as e:
                         st.error("행 삭제 중 오류")
                         if debug: st.exception(e)
@@ -600,7 +694,7 @@ with tab4:
                         if os.path.exists(LOG_PATH):
                             os.replace(LOG_PATH, backup_name)
                         pd.DataFrame(columns=["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]).to_csv(LOG_PATH, index=False)
-                        st.success(f"복구 완료. 기존 파일은 {backup_name} 로 백업됨.")
+                        st.success(f"복구 완료. 기존 파일은 {backup_name} 로 백업됨."); _force_rerun()
                     except Exception as e:
                         st.error("복구 실패")
                         if debug: st.exception(e)
@@ -609,17 +703,7 @@ with tab4:
             if debug: st.exception(e)
     else:
         st.info("아직 로그가 없습니다.")
-
-    st.markdown("---")
-    # --- FoodDB 편집 ---
-    fdb = load_food_db()
-    st.caption("태그(영양)은 JSON 배열 권장 예) [\"Protein\",\"Fiber\"]. 저장 시 자동 정규화합니다.")
-    fdb_view = fdb.copy()
-    fdb_edit = st.data_editor(fdb_view, num_rows="dynamic", use_container_width=True, key="edit_fooddb")
-    if st.button("FoodDB 저장"):
-        try:
-            save_food_db(fdb_edit.copy())
-            st.success("FoodDB 저장됨.")
+            st.success("FoodDB 저장됨."); _force_rerun()
         except Exception as e:
             st.error("FoodDB 저장 중 오류")
             if debug: st.exception(e)
@@ -631,6 +715,6 @@ with tab4:
         try:
             rules = json.load(uploaded)
             save_user_rules(rules)
-            st.success("user_rules.json 업데이트 완료. 사이드바 확인.")
+            st.success("user_rules.json 업데이트 완료. 사이드바 확인."); _force_rerun()
         except Exception as e:
             st.error(f"업로드 실패: {e}")
