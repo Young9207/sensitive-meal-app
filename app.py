@@ -23,11 +23,9 @@ USER_RULES_PATH = "user_rules.json"
 SLOTS = ["오전","오전 간식","점심","오후","오후 간식","저녁"]
 EVENT_TYPES = ["food","supplement","symptom"]  # 단순화
 
-CORE_NUTRIENTS = ["Protein","LightProtein","ComplexCarb","HealthyFat","Fiber",
-                  "A","B","C","D","E","K","Fe","Mg","Omega3","K_potassium",
-                  "Iodine","Ca","Hydration","Circulation"]
+# CORE_NUTRIENTS now imported from nutrition_assessor
 
-ESSENTIALS = ["Protein","ComplexCarb","Fiber","B","C","A","K","Mg","Omega3","K_potassium","HealthyFat","D"]
+# ESSENTIALS now imported from nutrition_assessor
 
 SUGGEST_MODES = ["기본","달다구리(당김)","역류","더부룩","붓기","피곤함","변비"]
 
@@ -789,14 +787,10 @@ except Exception:
     pass
 
 if 'CORE_NUTRIENTS' not in globals():
-    CORE_NUTRIENTS = [
-        "단백질", "식이섬유", "철", "칼슘", "마그네슘", "칼륨",
-        "오메가3", "비타민A", "비타민B", "비타민C", "비타민D", "비타민E",
-        "저당", "저염", "건강한지방"
-    ]
+    # CORE_NUTRIENTS now imported from nutrition_assessor
 
 if 'ESSENTIALS' not in globals():
-    ESSENTIALS = ["단백질", "식이섬유", "비타민C", "칼슘"]
+    # ESSENTIALS now imported from nutrition_assessor
 
 if 'food_db' not in globals():
     FOOD_ROWS = [
@@ -1263,3 +1257,74 @@ except Exception:
 # ==== [END ADDON] =============================================================
 
 # ==== [END ADDON] =============================================================
+
+
+
+# === Nutrient Deficiency Checker Panel ===
+try:
+    import streamlit as st  # ensure streamlit is available
+    with st.expander("🔎 Nutrient deficiency checker", expanded=False):
+        st.markdown("입력 형식: **영양소명 → 값** JSON (별칭 자동 정규화)")
+        example = {
+            "protein": 55,
+            "complex_carb": true,
+            "fiber": 18,
+            "VitaminC": 60,
+            "k_potassium": 2500,
+            "healthyFat": true,
+            "vitaminD": 10
+        }
+        default_text = st.session_state.get("nutr_json", json.dumps(example, ensure_ascii=False, indent=2))
+        txt = st.text_area("intake JSON", value=default_text, height=220)
+        colA, colB = st.columns(2)
+        essentials_only = colA.toggle("ESSENTIALS만 평가", value=True)
+        use_default_targets = colB.toggle("기본 목표치 사용(DEFAULT_TARGETS)", value=True,
+                                          help="끄면 자체 목표치 JSON을 입력할 수 있어요.")
+        targets = None
+        if not use_default_targets:
+            t_default = {
+                "Protein": 60,
+                "Fiber": 25,
+                "Omega3": 1.1,
+                "Magnesium": 310,
+                "Potassium": 3500,
+                "Calcium": 1000,
+                "Iron": 18,
+                "VitaminC": 75,
+                "VitaminD": 15,
+                "VitaminA": 700,
+                "VitaminE": 15,
+                "VitaminK": 90
+            }
+            t_text = st.text_area("목표치 JSON (nutrient → numeric)", value=json.dumps(t_default, ensure_ascii=False, indent=2), height=220)
+            try:
+                targets = json.loads(t_text)
+            except Exception as e:
+                st.warning(f"목표치 JSON 파싱 실패: {e} — DEFAULT_TARGETS를 사용합니다.")
+                targets = DEFAULT_TARGETS
+        else:
+            targets = DEFAULT_TARGETS
+        run = st.button("평가 실행")
+        if run:
+            try:
+                intake = json.loads(txt)
+                st.session_state["nutr_json"] = txt
+            except Exception as e:
+                st.error(f"입력 JSON 파싱 실패: {e}")
+                intake = {}
+            if intake:
+                from nutrition_assessor import assess_intake, pretty_report
+                res = assess_intake(intake=intake, targets=targets, check_list=ESSENTIALS if essentials_only else CORE_NUTRIENTS)
+                st.code(pretty_report(res), language="text")
+                # Table friendly dict
+                data = [{"nutrient": k, "value": v, "target": t} for (k, v, t) in res.insufficient]
+                if data:
+                    st.subheader("부족(Insufficient) 상세")
+                    st.dataframe(data, use_container_width=True)
+                if res.missing:
+                    st.info("미보고(Missing): " + ", ".join(res.missing))
+                if res.not_recognized:
+                    st.caption("무시된 키: " + ", ".join(res.not_recognized))
+except Exception as _e:
+    # Non-fatal: app continues even if panel fails
+    pass
