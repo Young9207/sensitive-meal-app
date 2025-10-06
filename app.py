@@ -1,10 +1,10 @@
 
 import streamlit as st
 import pandas as pd
-import json, re, random, time, os, io, zipfile
+import json, re, random, time, os, io, zipfile, math
 from datetime import date, time as dtime, datetime
 
-st.set_page_config(page_title="민감도 식사 로그 • 현실형 제안", page_icon="🥣", layout="wide")
+st.set_page_config(page_title="민감도 식사 로그 • 현실형 제안 (안정화)", page_icon="🥣", layout="wide")
 
 FOOD_DB_PATH = "food_db.csv"
 LOG_PATH = "log.csv"
@@ -50,6 +50,29 @@ VIRTUAL_RULES = {
     "__VIRTUAL_BROWN_RICE__": {"grade":"Avoid","flags":"개인 회피: 현미","tags":["ComplexCarb"]},
 }
 
+# ---------- 유틸
+def safe_json_loads(x):
+    if isinstance(x, list): return x
+    if x is None: return []
+    if isinstance(x, (int, float)): return []
+    s = str(x).strip()
+    if s == "": return []
+    # normalize single quotes to double
+    if s.startswith("[") and "'" in s and '"' not in s:
+        s = s.replace("'", '"')
+    try:
+        return json.loads(s)
+    except Exception:
+        # fallback: split by comma
+        return [t.strip() for t in s.split(",") if t.strip()]
+
+def safe_isnan(x):
+    try:
+        return math.isnan(x)
+    except Exception:
+        return False
+
+# ---------- 개인 규칙
 def load_user_rules():
     defaults = {"avoid_keywords": ["현미","현미밥","brown rice"], "allow_keywords": ["커피"]}
     if os.path.exists(USER_RULES_PATH):
@@ -67,53 +90,44 @@ def save_user_rules(rules: dict):
     with open(USER_RULES_PATH, "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
 
+# ---------- I/O
 def ensure_log():
     cols = ["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]
+    if not os.path.exists(LOG_PATH):
+        pd.DataFrame(columns=cols).to_csv(LOG_PATH, index=False)
     try:
-        if not os.path.exists(LOG_PATH):
-            pd.DataFrame(columns=cols).to_csv(LOG_PATH, index=False)
         log = pd.read_csv(LOG_PATH)
-        for c in cols:
-            if c not in log.columns:
-                log[c] = "" if c != "qty" else 0
-        log = log[cols]
-        log.to_csv(LOG_PATH, index=False)
-        return log
     except Exception:
         log = pd.DataFrame(columns=cols)
-        log.to_csv(LOG_PATH, index=False)
-        return log
+    for c in cols:
+        if c not in log.columns:
+            log[c] = "" if c != "qty" else 0
+    log = log[cols]
+    # best-effort types
+    log["qty"] = pd.to_numeric(log["qty"], errors="coerce").fillna(1.0)
+    log.to_csv(LOG_PATH, index=False)
+    return log
 
 def load_food_db():
+    base_cols = ["식품","식품군","등급","태그(영양)"]
+    if not os.path.exists(FOOD_DB_PATH):
+        pd.DataFrame(columns=base_cols).to_csv(FOOD_DB_PATH, index=False)
     try:
-        if not os.path.exists(FOOD_DB_PATH):
-            pd.DataFrame(columns=["식품","식품군","등급","태그(영양)"]).to_csv(FOOD_DB_PATH, index=False)
         df = pd.read_csv(FOOD_DB_PATH, encoding="utf-8", engine="python")
     except Exception:
-        df = pd.DataFrame(columns=["식품","식품군","등급","태그(영양)"])
-        df.to_csv(FOOD_DB_PATH, index=False)
-    if "태그(영양)" in df.columns:
-        def parse_tags(x):
-            try:
-                return json.loads(x)
-            except Exception:
-                return [t.strip() for t in str(x).split(",") if t.strip()]
-        df["태그(영양)"] = df["태그(영양)"].apply(parse_tags)
-    else:
-        df["태그(영양)"] = [[] for _ in range(len(df))]
+        df = pd.DataFrame(columns=base_cols)
+    for c in base_cols:
+        if c not in df.columns: df[c] = "" if c!="태그(영양)" else "[]"
+    # parse tags flexibly
+    df["태그(영양)"] = df["태그(영양)"].apply(safe_json_loads)
     if "등급" not in df.columns: df["등급"] = "Safe"
     if "식품군" not in df.columns: df["식품군"] = ""
-    return df
+    return df[base_cols]
 
 def save_food_db(df: pd.DataFrame):
     def to_jsonish(v):
         if isinstance(v, list): return json.dumps(v, ensure_ascii=False)
-        try:
-            parsed = json.loads(v)
-            return json.dumps(parsed, ensure_ascii=False)
-        except Exception:
-            items = [t.strip() for t in str(v).split(",") if t.strip()]
-            return json.dumps(items, ensure_ascii=False)
+        return json.dumps(safe_json_loads(v), ensure_ascii=False)
     if "태그(영양)" in df.columns:
         df["태그(영양)"] = df["태그(영양)"].apply(to_jsonish)
     df.to_csv(FOOD_DB_PATH, index=False, encoding="utf-8")
@@ -122,25 +136,34 @@ def weekday_ko(dt: date):
     return ["MON","TUE","WED","THU","FRI","SAT","SUN"][dt.weekday()]
 
 def add_log_row(log, date_str, t_str, slot, typ, item, qty, food_norm, grade, flags, tags, source="manual"):
+    try:
+        weekday = weekday_ko(datetime.strptime(date_str,"%Y-%m-%d").date())
+    except Exception:
+        weekday = ""
     new = pd.DataFrame([{
         "date": date_str,
-        "weekday": weekday_ko(datetime.strptime(date_str,"%Y-%m-%d").date()),
+        "weekday": weekday,
         "time": t_str,
         "slot": slot,
         "type": typ,
         "item": item,
-        "qty": qty,
+        "qty": float(qty) if pd.notnull(qty) else 1.0,
         "food_norm": food_norm,
         "grade": grade,
         "flags": flags,
         "tags": json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else (tags or ""),
         "source": source
     }])
-    log = pd.concat([log, new], ignore_index=True)
-    log.to_csv(LOG_PATH, index=False)
-    return log
+    # align columns
+    cols = ["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]
+    for c in cols:
+        if c not in log.columns: log[c] = "" if c != "qty" else 0
+    new = new[cols]
+    out = pd.concat([log[cols], new], ignore_index=True)
+    out.to_csv(LOG_PATH, index=False)
+    return out
 
-# --------- 자유입력 파싱 유틸 ---------
+# --------- 자유입력 파싱
 def split_free_text(s: str):
     if not s: return []
     extra = []
@@ -167,9 +190,12 @@ def match_food(name: str, food_db: pd.DataFrame):
     recs = food_db[food_db["식품"]==name]
     if not recs.empty:
         return name, True
-    candidates = food_db[food_db["식품"].str.contains(name, case=False, na=False)]
-    if not candidates.empty:
-        return candidates.iloc[0]["식품"], True
+    try:
+        candidates = food_db[food_db["식품"].str.contains(name, case=False, na=False)]
+        if not candidates.empty:
+            return candidates.iloc[0]["식품"], True
+    except Exception:
+        pass
     candidates = food_db[food_db["식품"].apply(lambda x: name in str(x))]
     if not candidates.empty:
         return candidates.iloc[0]["식품"], True
@@ -218,8 +244,10 @@ def log_free_foods(log, when_date, when_time, slot, memo, food_db, user_rules):
         saved.append((name_raw, qty))
     return log, saved
 
+# ---------- 점수
 def score_day(df_log, df_food, date_str):
-    day = df_log[(df_log["date"]==date_str) & (df_log["type"]=="food")]
+    if df_log.empty: return {k:0.0 for k in CORE_NUTRIENTS}
+    day = df_log[(df_log["date"]==date_str) & (df_log["type"]=="food")].copy()
     score = {k:0.0 for k in CORE_NUTRIENTS}
     for _, row in day.iterrows():
         fn = row.get("food_norm") or row.get("item")
@@ -227,8 +255,8 @@ def score_day(df_log, df_food, date_str):
         except Exception: qty = 1.0
         recs = df_food[df_food["식품"]==fn]
         if recs.empty:
-            try: tags = json.loads(row.get("tags") or "[]")
-            except Exception: tags = []
+            tags_val = row.get("tags")
+            tags = safe_json_loads(tags_val)
             for t in tags:
                 if t in score: score[t] += qty
             continue
@@ -237,6 +265,7 @@ def score_day(df_log, df_food, date_str):
             if t in score: score[t] += qty
     return score
 
+# ---------- 현실형 PANTRY
 PANTRY = {
     "protein": ["대구","연어","닭가슴살","돼지고기","소고기","계란(알레르기 없을 때)"],
     "veg": ["양배추","당근","브로콜리","애호박","오이","시금치","상추","무"],
@@ -361,7 +390,7 @@ food_db = load_food_db()
 log = ensure_log()
 user_rules = load_user_rules()
 
-st.title("🥣 민감도 식사 로그 • 현실형 제안")
+st.title("🥣 민감도 식사 로그 • 현실형 제안 (안정화)")
 
 with st.sidebar:
     st.subheader("개인 규칙")
@@ -418,7 +447,11 @@ with tab1:
     st.markdown("---")
     st.caption("최근 기록")
     try:
-        st.dataframe(log.sort_values(['date','time']).tail(20), use_container_width=True, height=240)
+        tmp = log.copy()
+        # sort by string to avoid dtype issues
+        tmp["date"] = tmp["date"].astype(str)
+        tmp["time"] = tmp["time"].astype(str)
+        st.dataframe(tmp.sort_values(['date','time']).tail(20), use_container_width=True, height=240)
     except Exception as e:
         st.error("최근 기록 표시 중 오류")
         if debug: st.exception(e)
@@ -442,19 +475,21 @@ with tab2:
     recent_items = []
     try:
         if diversity_n>0:
-            recent_df = log[log["type"]=="food"].sort_values(["date","time"]).tail(diversity_n*5)
+            r = log[log["type"]=="food"].copy()
+            r["date"] = r["date"].astype(str)
+            r["time"] = r["time"].astype(str)
+            recent_df = r.sort_values(["date","time"]).tail(diversity_n*5)
             recent_items = (recent_df["food_norm"].fillna("") + "|" + recent_df["item"].fillna("")).tolist()
             recent_items = [x.split("|")[0] for x in recent_items if x]
     except Exception as e:
         if debug: st.exception(e)
 
     mode = st.selectbox("제안 모드", SUGGEST_MODES, index=0)
-    rng = random.Random(int(time.time()) % 10**9)
 
     cols = st.columns(3)
     for idx in range(3):
         try:
-            title, meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, rng, load_user_rules())
+            title, meal = gen_meal(food_db, include_caution, mode, recent_items, favor_tags, random, load_user_rules())
             with cols[idx]:
                 st.markdown(f"**{title}**")
                 if meal:
@@ -500,7 +535,8 @@ with tab3:
         if debug: st.exception(e)
 
 with tab4:
-    st.subheader("🛠 기록/DB 편집")
+    st.subheader("🛠 기록/DB 편집 & 복구")
+    # --- 로그 편집 ---
     min_d = st.date_input("시작일", value=date.today())
     max_d = st.date_input("종료일", value=date.today())
     try:
@@ -510,24 +546,39 @@ with tab4:
         df.to_csv(LOG_PATH, index=False)
     if not df.empty:
         try:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-            mask = (df["date"]>=min_d) & (df["date"]<=max_d)
-            view = df[mask].copy()
-            view = view.reset_index()  # keep original index for mapping back
-            st.caption("셀 수정 후 '변경 저장'을 눌러 반영하세요.")
+            # normalize types for view only
+            dfv = df.copy()
+            dfv["date"] = pd.to_datetime(dfv["date"], errors="coerce").dt.date
+            mask = (dfv["date"]>=min_d) & (dfv["date"]<=max_d)
+            view = dfv[mask].copy()
+            view = view.reset_index()  # keep original index
+            st.caption("셀 수정 후 '변경 저장'을 눌러 반영하세요. 행 추가는 아래 규칙으로 저장되며, 삭제는 오른쪽 기능 사용.")
             edited = st.data_editor(view.drop(columns=["index"]), num_rows="dynamic", use_container_width=True, key="edit_log")
-            c1,c2 = st.columns(2)
+
+            c1,c2,c3 = st.columns(3)
             with c1:
                 if st.button("변경 저장"):
                     try:
-                        # map back to original df indices
-                        if len(edited) == len(view):
-                            df.loc[view["index"], edited.columns] = edited.values
-                            df["date"] = df["date"].astype(str)
-                            df.to_csv(LOG_PATH, index=False)
-                            st.success("로그 저장됨.")
-                        else:
-                            st.error("편집 행 수가 변경되어 저장할 수 없습니다. 행 추가/삭제는 별도 기능을 사용하세요.")
+                        # 1) update existing rows (by original index)
+                        min_len = min(len(edited), len(view))
+                        for col in edited.columns:
+                            df.loc[view.iloc[:min_len]["index"], col] = edited.iloc[:min_len][col].values
+                        # 2) append new rows if any
+                        if len(edited) > len(view):
+                            extra = edited.iloc[len(view):].copy()
+                            # ensure required columns exist
+                            for c in df.columns:
+                                if c not in extra.columns:
+                                    extra[c] = "" if c != "qty" else 1.0
+                            # convert date to str
+                            if "date" in extra.columns:
+                                extra["date"] = extra["date"].astype(str)
+                            df = pd.concat([df, extra[df.columns]], ignore_index=True)
+                        # 3) finalize types & save
+                        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(1.0)
+                        df["date"] = df["date"].astype(str)
+                        df.to_csv(LOG_PATH, index=False)
+                        st.success("로그 저장됨.")
                     except Exception as e:
                         st.error("로그 저장 중 오류")
                         if debug: st.exception(e)
@@ -542,13 +593,29 @@ with tab4:
                     except Exception as e:
                         st.error("행 삭제 중 오류")
                         if debug: st.exception(e)
+            with c3:
+                if st.button("파일 복구(깨졌을 때 초기화)"):
+                    try:
+                        backup_name = f"log_backup_{int(time.time())}.csv"
+                        if os.path.exists(LOG_PATH):
+                            os.replace(LOG_PATH, backup_name)
+                        pd.DataFrame(columns=["date","weekday","time","slot","type","item","qty","food_norm","grade","flags","tags","source"]).to_csv(LOG_PATH, index=False)
+                        st.success(f"복구 완료. 기존 파일은 {backup_name} 로 백업됨.")
+                    except Exception as e:
+                        st.error("복구 실패")
+                        if debug: st.exception(e)
+        except Exception as e:
+            st.error("로그 편집 UI 구성 중 오류")
+            if debug: st.exception(e)
     else:
         st.info("아직 로그가 없습니다.")
 
     st.markdown("---")
+    # --- FoodDB 편집 ---
     fdb = load_food_db()
-    st.caption("태그(영양)은 JSON 배열 권장 예) [\"Protein\",\"Fiber\"].")
-    fdb_edit = st.data_editor(fdb, num_rows="dynamic", use_container_width=True, key="edit_fooddb")
+    st.caption("태그(영양)은 JSON 배열 권장 예) [\"Protein\",\"Fiber\"]. 저장 시 자동 정규화합니다.")
+    fdb_view = fdb.copy()
+    fdb_edit = st.data_editor(fdb_view, num_rows="dynamic", use_container_width=True, key="edit_fooddb")
     if st.button("FoodDB 저장"):
         try:
             save_food_db(fdb_edit.copy())
@@ -558,6 +625,7 @@ with tab4:
             if debug: st.exception(e)
 
     st.markdown("---")
+    # --- user_rules 가져오기 ---
     uploaded = st.file_uploader("user_rules.json 업로드(덮어쓰기)", type=["json"])
     if uploaded is not None:
         try:
