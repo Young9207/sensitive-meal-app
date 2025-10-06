@@ -778,13 +778,7 @@ with tab4:
         except Exception as e:
             st.error(f"업로드 실패: {e}")
 
-
-
-# ==== [ADDON] 즉석 식단 평가 + 영양 한줄 코멘트
 # ==== [ADDON] 즉석 식단 평가 + 영양 한줄 코멘트 ===============================
-# 이 블록은 기존 코드에 영향을 주지 않고, 페이지 하단에 "즉석 식단 평가" 섹션을 추가합니다.
-# 원 코드의 변수(food_db, CORE_NUTRIENTS, ESSENTIALS, gen_meal 등)가 있으면 그대로 활용하고,
-# 없으면 내부 기본값을 사용합니다.
 try:
     import streamlit as st
     import pandas as pd
@@ -794,7 +788,6 @@ try:
 except Exception:
     pass
 
-# 기본 상수/함수 존재 여부 확인 후 보강 --------------------------
 if 'CORE_NUTRIENTS' not in globals():
     CORE_NUTRIENTS = [
         "단백질", "식이섬유", "철", "칼슘", "마그네슘", "칼륨",
@@ -848,7 +841,6 @@ if 'NUTRIENT_TIPS' not in globals():
         "저지방": "열량 대비 단백질 확보에 유리."
     }
 
-# 확장형 설명/대표식품
 if 'NUTRIENT_TIPS_LONG' not in globals():
     NUTRIENT_TIPS_LONG = {
         "단백질": "근육 유지, 상처 회복, 포만감 유지에 핵심.",
@@ -887,7 +879,6 @@ if 'NUTRIENT_SOURCES' not in globals():
         "건강한지방": ["올리브유", "아보카도", "견과류"]
     }
 
-
 if 'BENEFIT_MAP' not in globals():
     BENEFIT_MAP = {
         "단백질": "근육·포만감",
@@ -902,36 +893,6 @@ if 'BENEFIT_MAP' not in globals():
         "비타민A": "눈·피부",
         "비타민B": "에너지대사"
     }
-
-def _make_intuitive_summary(scores: dict, threshold: float = 1.0) -> str:
-    """Return a one-line, intuitive daily summary from nutrient scores."""
-    filled_benefits = []
-    low_benefits = []
-    # prioritize essentials first for clarity
-    ordered_keys = list(ESSENTIALS) + [k for k in BENEFIT_MAP.keys() if k not in ESSENTIALS]
-    for k in ordered_keys:
-        val = float(scores.get(k, 0) or 0)
-        benefit = BENEFIT_MAP.get(k)
-        if not benefit:
-            continue
-        if val >= threshold:
-            if benefit not in filled_benefits:
-                filled_benefits.append(benefit)
-        else:
-            if benefit not in low_benefits:
-                low_benefits.append(benefit)
-
-    left = " · ".join(filled_benefits[:3]) if filled_benefits else ""
-    right = " · ".join(low_benefits[:3]) if low_benefits else ""
-    if left and right:
-        return f"오늘 한 줄 요약: {left}는 꽤 채워졌고, {right}는 보충이 필요해요."
-    elif left:
-        return f"오늘 한 줄 요약: {left}는 잘 챙겨졌어요."
-    elif right:
-        return f"오늘 한 줄 요약: {right} 보충이 필요해요."
-    else:
-        return "오늘 한 줄 요약: 분석할 항목이 없어요."
-
 
 if 'VIRTUAL_RULES' not in globals():
     VIRTUAL_RULES = {}
@@ -1023,7 +984,6 @@ def _tokens_from_today_log():
     df = _ensure_log()
     if df is None or df.empty:
         return []
-    # Keep only today's entries up to now
     today = _dt.datetime.now().date()
     try:
         df['date'] = pd.to_datetime(df['date']).dt.date
@@ -1043,26 +1003,100 @@ def _tokens_from_today_log():
             tokens.append(token)
     return tokens
 
-def _gen_meal_wrapper(df, include_caution, favor_tags, recent_items, user_rules, seed):
+def _today_food_log_df():
+    import datetime as _dt
+    df = _ensure_log()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["type","date","time","food_norm","item","_dt","시간대"])
     try:
-        rng = random.Random(seed)
-        title, meal, explain = gen_meal(
-            df, include_caution, mode="기본",
-            recent_items=recent_items, favor_tags=favor_tags,
-            rng=rng, user_rules=user_rules, allow_rare=False
-        )
-        return title, meal, explain
+        df = df[df["type"] == "food"].copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
     except Exception:
-        df2 = df.copy()
-        if not include_caution:
-            df2 = df2[df2["등급"] != "Caution"]
-        pool = df2["식품"].tolist()
-        rng = random.Random(seed)
-        picks = rng.sample(pool, k=min(3, len(pool))) if len(pool) >= 3 else pool
-        explain = ("부족 태그 보완 중심: " + ", ".join(favor_tags)) if favor_tags else ""
-        return "다음 식사 제안", picks, explain
+        return pd.DataFrame(columns=["type","date","time","food_norm","item","_dt","시간대"])
+    today = pd.Timestamp.now().normalize()
+    df = df[df["date"].dt.normalize() == today]
+    def _parse_dt(row):
+        try:
+            t = pd.to_datetime(str(row.get("time") or ""), errors="coerce").time()
+        except Exception:
+            t = None
+        d = row["date"].date()
+        if t is None:
+            return pd.Timestamp.combine(d, pd.Timestamp.now().time())
+        return pd.Timestamp.combine(d, t)
+    if not df.empty:
+        df["_dt"] = df.apply(_parse_dt, axis=1)
+        def _tod_label(ts):
+            h = ts.hour
+            if 5 <= h < 11: return "아침"
+            if 11 <= h < 16: return "점심"
+            if 16 <= h < 21: return "저녁"
+            return "간식"
+        df["시간대"] = df["_dt"].apply(_tod_label)
+        df = df.sort_values("_dt")
+    else:
+        df["_dt"] = pd.NaT
+        df["시간대"] = ""
+    return df
 
-# UI 섹션 -------------------------------------------------------
+def _per_meal_breakdown(df_food, df_today):
+    rows = []
+    for _, r in df_today.iterrows():
+        raw = str(r.get("item") or "").strip() or str(r.get("food_norm") or "").strip()
+        if not raw:
+            continue
+        mapped, matched = _match_food(raw, df_food)
+        tags, benefits = [], []
+        if matched:
+            try:
+                rec = df_food[df_food["식품"] == mapped].iloc[0]
+                tags = list(rec.get("태그(영양)", [])) or []
+            except Exception:
+                tags = []
+        for t in tags:
+            b = BENEFIT_MAP.get(t) or NUTRIENT_TIPS.get(t) or ""
+            if b and b not in benefits:
+                benefits.append(b)
+        rows.append({
+            "시간대": r.get("시간대", ""),
+            "시각": r.get("_dt"),
+            "입력항목": raw,
+            "매칭식품": mapped if matched else raw,
+            "채워진태그": ", ".join(tags[:5]),
+            "직관설명": " · ".join(benefits[:3])
+        })
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        df_out = df_out.sort_values(["시간대","시각"])
+    return df_out
+
+def _make_intuitive_summary(scores: dict, threshold: float = 1.0) -> str:
+    filled_benefits = []
+    low_benefits = []
+    ordered_keys = list(ESSENTIALS) + [k for k in BENEFIT_MAP.keys() if k not in ESSENTIALS]
+    for k in ordered_keys:
+        val = float(scores.get(k, 0) or 0)
+        benefit = BENEFIT_MAP.get(k)
+        if not benefit:
+            continue
+        if val >= threshold:
+            if benefit not in filled_benefits:
+                filled_benefits.append(benefit)
+        else:
+            if benefit not in low_benefits:
+                low_benefits.append(benefit)
+    left = " · ".join(filled_benefits[:3]) if filled_benefits else ""
+    right = " · ".join(low_benefits[:3]) if low_benefits else ""
+    if left and right:
+        return f"오늘 한 줄 요약: {left}는 꽤 채워졌고, {right}는 보충이 필요해요."
+    elif left:
+        return f"오늘 한 줄 요약: {left}는 잘 챙겨졌어요."
+    elif right:
+        return f"오늘 한 줄 요약: {right} 보충이 필요해요."
+    else:
+        return "오늘 한 줄 요약: 분석할 항목이 없어요."
+
 try:
     st.divider()
     with st.container():
@@ -1078,7 +1112,7 @@ try:
                 for k in CORE_NUTRIENTS if (k in NUTRIENT_TIPS or k in NUTRIENT_TIPS_LONG)
             ])
             st.dataframe(df_gloss, use_container_width=True, height=380)
-            st.caption("• 점수 표의 ‘한줄설명’과 동일한 톤으로 정리했습니다. 부족 태그가 뜨면 여기의 대표 식품을 참고해 다음 식사를 구성해보세요.")
+            st.caption("• 부족 태그가 뜨면 대표 식품을 참고해 다음 식사를 구성해보세요.")
 
         colA, colB, colC, colD = st.columns([1.2, 1.2, 1, 1])
         with colA:
@@ -1138,14 +1172,45 @@ try:
                     st.warning("부족 태그:\n" + "\n".join(tips_list))
                 else:
                     st.success("핵심 태그 충족! (ESSENTIALS 기준)")
-                # 직관적 한 줄 요약 표시
+
                 try:
                     summary_line = _make_intuitive_summary(scores, threshold=1.0)
                     st.info(summary_line)
                 except Exception:
                     pass
 
+                # --- Per-meal breakdown ---
+                try:
+                    if source_mode == "오늘 기록 사용":
+                        _df_today = _today_food_log_df()
+                        df_meal = _per_meal_breakdown(food_db, _df_today)
+                        if not df_meal.empty:
+                            st.markdown("#### 🍽️ 식사별 보충 포인트 (오늘)")
+                            for label in ["아침","점심","저녁","간식"]:
+                                sub = df_meal[df_meal["시간대"] == label]
+                                if sub.empty:
+                                    continue
+                                st.markdown(f"**{label}**")
+                                st.dataframe(
+                                    sub[["시각","입력항목","매칭식품","채워진태그","직관설명"]]
+                                      .rename(columns={
+                                          "시각":"시간", "입력항목":"먹은 것",
+                                          "매칭식품":"매칭", "채워진태그":"태그", "직관설명":"한줄설명"
+                                      }),
+                                    use_container_width=True, height=min(300, 60+28*len(sub))
+                                )
+                                uniq_benefits = []
+                                for s in sub["직관설명"].tolist():
+                                    for part in [x.strip() for x in s.split("·")]:
+                                        if part and part not in uniq_benefits:
+                                            uniq_benefits.append(part)
+                                if uniq_benefits:
+                                    st.caption("보충된 포인트: " + " · ".join(uniq_benefits[:6]))
+                except Exception:
+                    pass
 
+                # 다음 식사 제안
+                st.markdown("#### 🍽️ 다음 식사 제안 (3가지)")
                 recent_items = []
                 try:
                     if diversity_n > 0:
@@ -1160,15 +1225,26 @@ try:
                 except Exception:
                     recent_items = []
 
-                st.markdown("#### 🍽️ 다음 식사 제안 (3가지)")
                 seed = hash(("quick-eval", text_in)) % (10**9)
                 favor_tags = missing
                 cols = st.columns(3)
                 for i in range(3):
                     try:
-                        title, meal, explain = _gen_meal_wrapper(
-                            food_db, include_caution, favor_tags, recent_items, user_rules_local, seed + i
-                        )
+                        try:
+                            rng = random.Random(seed + i)
+                            title, meal, explain = gen_meal(
+                                food_db, include_caution, mode="기본",
+                                recent_items=recent_items, favor_tags=favor_tags,
+                                rng=rng, user_rules=user_rules_local, allow_rare=False
+                            )
+                        except Exception:
+                            df2 = food_db.copy()
+                            if not include_caution:
+                                df2 = df2[df2["등급"] != "Caution"]
+                            pool = df2["식품"].tolist()
+                            rng = random.Random(seed + i)
+                            meal = rng.sample(pool, k=min(3, len(pool))) if len(pool) >= 3 else pool
+                            title, explain = "다음 식사 제안", ("부족 태그 보완 중심: " + ", ".join(favor_tags)) if favor_tags else ""
                         with cols[i]:
                             st.markdown(f"**{title} #{i+1}**")
                             st.write(" / ".join(meal))
@@ -1182,8 +1258,4 @@ try:
             except Exception as e:
                 st.error(f"분석 실패: {e}")
 except Exception:
-    # UI 추가 실패 시에도 기존 앱이 계속 동작하도록 무시
     pass
-
-# ==== [END ADDON] =============================================================
-# ==== [END ADDON] =============================================================
