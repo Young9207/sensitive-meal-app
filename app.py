@@ -71,6 +71,42 @@ def init_daily_state():
     st.session_state.setdefault("threshold", 1)
     st.session_state.setdefault("export_flag", True)
 
+def init_daily_state():
+    """자정 단위로 state를 유지. 날짜 바뀌면 자동 초기화."""
+    if "daily_date" not in st.session_state:
+        st.session_state.daily_date = today_str()
+    if st.session_state.daily_date != today_str():
+        for k in ["inputs", "last_items_df", "last_nutri_df", "last_recs", "last_combo"]:
+            st.session_state.pop(k, None)
+        st.session_state.daily_date = today_str()
+    # 입력/결과 컨테이너 준비
+    st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
+    st.session_state.setdefault("last_items_df", None)
+    st.session_state.setdefault("last_nutri_df", None)
+    st.session_state.setdefault("last_recs", [])
+    st.session_state.setdefault("last_combo", [])
+    st.session_state.setdefault("threshold", 1)
+    st.session_state.setdefault("export_flag", True)
+
+    # ✅ 추가: log.csv가 있으면 오늘 날짜의 입력 자동 복원
+    try:
+        df_log = pd.read_csv(LOG_CSV)
+        today_logs = df_log[df_log["date"] == today_str()]
+        if not today_logs.empty:
+            # 슬롯별로 최근 입력 자동 복원
+            for slot in SLOTS:
+                latest = today_logs[today_logs["slot"] == slot]
+                if not latest.empty:
+                    joined_items = ", ".join(latest["입력항목"].tolist())
+                    st.session_state.inputs[slot] = joined_items
+            # 화면 표시용 DF도 복원
+            st.session_state.last_items_df = today_logs.rename(columns={
+                "slot": "슬롯"
+            })
+    except FileNotFoundError:
+        pass
+
+
 
 # ==================== 유틸/전처리 ====================
 def _parse_tags_from_slash(cell) -> List[str]:
@@ -482,6 +518,27 @@ def main():
                 key=f"ta_{slot}",
                 value=st.session_state.inputs.get(slot, "")
             )
+            # ✅ 실시간 반영
+            if val != st.session_state.inputs.get(slot, ""):
+                st.session_state.inputs[slot] = val
+                # 즉시 log.csv 업데이트
+                new_log = pd.DataFrame([{
+                    "timestamp": datetime.now(TZ).isoformat(timespec="seconds"),
+                    "date": today_str(),
+                    "time": datetime.now(TZ).strftime("%H:%M:%S"),
+                    "slot": slot,
+                    "입력항목": val,
+                    "수량": "",
+                    "매칭식품": "",
+                    "등급": "",
+                    "태그": ""
+                }])
+                try:
+                    old = pd.read_csv(LOG_CSV)
+                    merged = pd.concat([old, new_log], ignore_index=True)
+                except Exception:
+                    merged = new_log
+                merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
             st.session_state.inputs[slot] = val
 
     # 옵션/버튼
