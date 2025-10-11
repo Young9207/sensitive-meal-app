@@ -40,7 +40,7 @@ NUTRIENT_DICT_CSV = "nutrient_dict.csv"
 LOG_CSV = "log.csv"
 FOOD_DB_UPDATED_CSV = "food_db_updated.csv"
 
-SLOTS = ["아침", "오전 간식", "점심", "오후 간식", "저녁"]
+SLOTS = ["아침", "아침보조제", "오전 간식", "점심", "점심보조제", "오후 간식", "저녁", "저녁보조제", "저녁 간식"]
 
 
 # ==================== 타임존/하루 상태 ====================
