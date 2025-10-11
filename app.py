@@ -101,7 +101,8 @@ def init_daily_state():
                     st.session_state.inputs[slot] = joined_items
             # 화면 표시용 DF도 복원
             st.session_state.last_items_df = today_logs.rename(columns={
-                "slot": "슬롯"
+                "slot": "슬롯",
+                "date": "날짜"
             })
     except FileNotFoundError:
         pass
