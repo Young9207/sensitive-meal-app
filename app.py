@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py (enhanced)
+diet_analyzer.py (fixed)
 - 각 식사 슬롯별 컨디션 입력 가능
 - log.csv / URL 상태 / 화면 표시 모두 반영
 - 무한복사 현상 방지 (최신 1건만 복원)
-- 다음 식사 제안 (영양 태그 + 컨디션 기반)
 """
 
 from __future__ import annotations
@@ -300,88 +299,12 @@ def main():
                     subset=["date","slot","입력항목","매칭식품","등급","태그","컨디션"], keep="last"
                 )
                 merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
-                st.success("log.csv 저장 완료")
+                st.success(f"log.csv 저장 완료")
             except Exception as e:
                 st.error(f"log.csv 저장 오류: {e}")
 
         st.session_state.last_items_df = items_df_all
 
-        # ================== 다음 식사 제안 ==================
-        st.markdown("### 🍽 다음 식사 제안")
-
-        # 컨디션 키워드 → 권장 태그 매핑
-        condition_map = {
-            "피곤": {"tags": ["철분", "비타민B군", "단백질"], "reason": "에너지 대사와 피로 회복 지원"},
-            "복부팽만": {"tags": ["식이섬유", "소화효소", "프로바이오틱스"], "reason": "소화 개선 및 장내 가스 완화"},
-            "속쓰림": {"tags": ["저지방", "알칼리성식품"], "reason": "위산 중화 및 자극 완화"},
-            "두통": {"tags": ["마그네슘", "수분"], "reason": "긴장 완화 및 수분 보충"},
-            "불면": {"tags": ["트립토판", "마그네슘"], "reason": "수면 호르몬 분비 유도"},
-            "스트레스": {"tags": ["비타민C", "마그네슘"], "reason": "스트레스 완화와 신경 안정"},
-            "피로": {"tags": ["철분", "비타민B군", "단백질"], "reason": "체력 회복에 도움"},
-            "변비": {"tags": ["식이섬유", "수분"], "reason": "배변 개선 및 장운동 촉진"},
-        }
-
-        df_food_safe = df_food[df_food["등급"].fillna("Safe") == "Safe"]
-        st.session_state.last_recs = []
-
-        # ---- ① 컨디션 기반 제안 ----
-        used_conditions = set(
-            c for c in st.session_state.conditions.values()
-            if isinstance(c, str) and c.strip()
-        )
-
-        cond_recs = []
-        for cond in used_conditions:
-            for key, v in condition_map.items():
-                if key in cond:
-                    tags = v["tags"]
-                    reason = v["reason"]
-                    rec_foods = df_food_safe[
-                        df_food_safe["태그리스트"].apply(
-                            lambda lst: (isinstance(lst, list) and any(t in lst for t in tags))
-                        )
-                    ]["식품"].unique().tolist()
-                    rec_sample = ", ".join(rec_foods[:5]) if rec_foods else "추천 식품 없음"
-                    st.markdown(f"**컨디션: {cond}** → {reason}")
-                    st.markdown(f"👉 추천 식품: {rec_sample}")
-                    cond_recs.append({cond: rec_foods[:5]})
-        if not cond_recs:
-            st.info("특정 컨디션 기반 제안 없음")
-
-        # ---- ② 영양 태그 부족 보완 ----
-        if not total_counts:
-            st.info("분석된 영양 태그가 없습니다.")
-        else:
-            th = st.session_state.get("threshold", 1)
-            low_tags = [t for t, v in total_counts.items() if v < th]
-
-            if low_tags:
-                st.write("---")
-                st.write("**부족한 영양 태그 보완 제안**")
-                for t in low_tags:
-                    desc = nutrient_desc.get(t, "")
-                    if desc:
-                        st.write(f"**{t}** ({desc}) 부족")
-                    else:
-                        st.write(f"**{t}** 부족")
-                    recs = df_food_safe[
-                        df_food_safe["태그리스트"].apply(
-                            lambda lst: (isinstance(lst, list) and t in lst)
-                        )
-                    ]["식품"].unique().tolist()
-                    if recs:
-                        sample = ", ".join(recs[:5])
-                        st.markdown(f"👉 추천 식품: {sample}")
-                        st.session_state.last_recs.append({t: recs[:5]})
-                    else:
-                        st.markdown(f"⚠️ `{t}` 태그를 가진 안전 식품을 찾지 못했습니다.")
-            else:
-                st.success("현재 식단에서 주요 영양 태그가 충분히 충족되었습니다 🎉")
-
-        # 전체 추천 저장(컨디션+부족 태그)
-        st.session_state.last_recs += cond_recs
-
-    # ================== 매칭 결과 테이블 (항상 표시) ==================
     st.markdown("### 🍱 슬롯별 매칭 결과")
     if st.session_state.last_items_df is None or st.session_state.last_items_df.empty:
         st.info("매칭된 항목이 없습니다.")
