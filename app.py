@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py (integrated version)
+diet_analyzer.py (final)
 - log.csv 기반 자동 복원 (앱 꺼도 유지)
 - 자정 단위 초기화
 - 컨디션 selectbox + 직접 입력
-- 클릭형 제안 (리스트 안 사라짐)
-- 날짜 선택 포함
+- 클릭형 제안 (사라지지 않음)
+- 입력창 rerun 시에도 유지
 """
 
 from __future__ import annotations
-import re, sys, ast, json
+import re, sys, ast, json, os
 from collections import defaultdict
 from typing import List, Dict, Tuple, Any
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
-import os
 
 try:
     import streamlit as st
@@ -42,7 +41,7 @@ def next_midnight():
     return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=TZ)
 
 def init_daily_state():
-    """자정 단위로 상태를 유지하고, log.csv를 통해 복원"""
+    """자정 단위로 상태를 유지하고 log.csv에서 복원"""
     if "daily_date" not in st.session_state:
         st.session_state.daily_date = today_str()
     if st.session_state.daily_date != today_str():
@@ -57,7 +56,7 @@ def init_daily_state():
     st.session_state.setdefault("analyzed", False)
     st.session_state.setdefault("selected_date", date.today())
 
-    # ✅ log.csv에서 오늘 날짜의 최신 입력 복원
+    # ✅ log.csv에서 오늘 입력 복원
     try:
         if os.path.exists(LOG_CSV):
             df_log = pd.read_csv(LOG_CSV)
@@ -191,27 +190,39 @@ def main():
     remain = next_midnight() - datetime.now(TZ)
     st.caption(f"입력값은 자정까지 보존됩니다 (남은 {remain.seconds//3600}시간 {remain.seconds%3600//60}분)")
 
+    # ✅ 입력창 및 컨디션 (입력값 완전 유지)
     condition_options = ["양호", "피곤함", "복부팽만", "속쓰림", "두통", "불면", "변비", "설사", "직접 입력"]
 
     for slot in SLOTS:
-        st.text_area(slot, height=60, placeholder=f"{slot} 식단 입력", key=f"input_{slot}")
-        st.session_state.inputs[slot] = st.session_state.get(f"input_{slot}", "")
+        val = st.text_area(
+            slot,
+            height=70,
+            placeholder=f"{slot} 식단 입력",
+            value=st.session_state.inputs.get(slot, ""),
+            key=f"ta_{slot}"
+        )
+        st.session_state.inputs[slot] = val
 
         prev_cond = st.session_state.conditions.get(slot, "")
         default_index = condition_options.index(prev_cond) if prev_cond in condition_options else len(condition_options) - 1
         selected = st.selectbox(f"{slot} 컨디션", condition_options, index=default_index, key=f"cond_select_{slot}")
+
         if selected == "직접 입력":
-            st.text_input(f"{slot} 컨디션 직접 입력", key=f"cond_input_{slot}")
-            st.session_state.conditions[slot] = st.session_state.get(f"cond_input_{slot}", "")
+            cond_input = st.text_input(
+                f"{slot} 컨디션 직접 입력",
+                value=prev_cond if prev_cond not in condition_options else "",
+                key=f"cond_input_{slot}"
+            )
+            st.session_state.conditions[slot] = cond_input
         else:
             st.session_state.conditions[slot] = selected
 
-    # 분석하기 버튼
+    # 분석하기
     if st.button("분석하기", type="primary"):
         st.session_state.analyzed = True
         st.session_state.last_clicked_foods.clear()
 
-        # log.csv에 저장
+        # log.csv 저장
         all_logs = []
         for slot in SLOTS:
             _, _, log_df = analyze_items_for_slot(
@@ -224,9 +235,9 @@ def main():
             try:
                 prev = pd.read_csv(LOG_CSV) if os.path.exists(LOG_CSV) else pd.DataFrame()
                 merged = pd.concat([prev, logs_all], ignore_index=True)
-                merged.drop_duplicates(subset=["date", "slot", "입력항목", "매칭식품", "태그", "컨디션"], keep="last", inplace=True)
+                merged.drop_duplicates(subset=["date","slot","입력항목","매칭식품","태그","컨디션"], keep="last", inplace=True)
                 merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
-                st.success("✅ log.csv 저장 완료 — 재실행 시 복원됨")
+                st.success("✅ log.csv 저장 완료 — 앱을 꺼도 오늘 기록 유지됩니다.")
             except Exception as e:
                 st.error(f"log.csv 저장 오류: {e}")
 
@@ -244,6 +255,7 @@ def main():
         items_df_all = pd.concat(all_items, ignore_index=True) if all_items else pd.DataFrame()
         st.session_state.last_items_df = items_df_all
 
+        # 🍽 개인화된 다음 식사 제안
         st.markdown("### 🍽 개인화된 다음 식사 제안")
         total_tags = []
         if not items_df_all.empty and "태그" in items_df_all.columns:
