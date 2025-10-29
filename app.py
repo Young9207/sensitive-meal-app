@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py (with condition-based personalized suggestions + clickable details)
+diet_analyzer.py (with persistent clickable details)
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ except Exception:
 FOOD_DB_CSV = "food_db.csv"
 NUTRIENT_DICT_CSV = "nutrient_dict.csv"
 LOG_CSV = "log.csv"
-FOOD_DB_UPDATED_CSV = "food_db_updated.csv"
 
 SLOTS = ["아침", "아침보조제", "오전 간식", "점심", "점심보조제",
          "오후 간식", "저녁", "저녁보조제", "저녁 간식"]
@@ -48,9 +47,6 @@ def init_daily_state():
     st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
     st.session_state.setdefault("conditions", {s: "" for s in SLOTS})
     st.session_state.setdefault("last_items_df", None)
-    st.session_state.setdefault("last_nutri_df", None)
-    st.session_state.setdefault("last_recs", [])
-    st.session_state.setdefault("last_combo", [])
     st.session_state.setdefault("threshold", 1)
     st.session_state.setdefault("export_flag", True)
 
@@ -194,42 +190,6 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame,
     return (pd.DataFrame(per_item_rows), dict(nutrient_counts),
             pd.DataFrame(log_rows), unmatched_names)
 
-# ==================== URL 상태 저장/복원 ====================
-def _b64_encode(obj: dict) -> str:
-    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    comp = zlib.compress(raw, level=9)
-    return base64.urlsafe_b64encode(comp).decode("ascii")
-
-def _b64_decode(s: str) -> dict | None:
-    try:
-        comp = base64.urlsafe_b64decode(s.encode("ascii"))
-        raw = zlib.decompress(comp)
-        return json.loads(raw.decode("utf-8"))
-    except Exception:
-        return None
-
-def save_state_to_url():
-    data = {
-        "inputs": st.session_state.get("inputs", {}),
-        "conditions": st.session_state.get("conditions", {}),
-        "threshold": st.session_state.get("threshold", 1),
-        "export_flag": st.session_state.get("export_flag", True),
-        "daily_date": st.session_state.get("daily_date", None)
-    }
-    st.experimental_set_query_params(state=_b64_encode(data))
-
-def load_state_from_url():
-    params = st.experimental_get_query_params()
-    if "state" not in params:
-        return
-    decoded = _b64_decode(params["state"][0])
-    if not decoded:
-        return
-    st.session_state.inputs = decoded.get("inputs", {})
-    st.session_state.conditions = decoded.get("conditions", {})
-    st.session_state.threshold = decoded.get("threshold", 1)
-    st.session_state.export_flag = decoded.get("export_flag", True)
-
 # ================== 컨디션 → 태그 매핑 ==================
 def condition_to_nutrients(condition: str) -> List[str]:
     cond = condition.lower()
@@ -292,13 +252,8 @@ def main():
     st.title("🥗 슬롯별 식단 분석 · 다음 식사 제안")
 
     init_daily_state()
-    remain = next_midnight() - datetime.now(TZ)
-    st.caption(f"현재 입력/결과는 자정까지 보존됩니다. 남은 시간: {remain.seconds//3600}시간 {remain.seconds%3600//60}분")
-
-    load_state_from_url()
-
-    df_food = load_food_db_simple(FOOD_DB_CSV)
-    nutrient_desc = load_nutrient_dict_simple(NUTRIENT_DICT_CSV)
+    df_food = load_food_db_simple()
+    nutrient_desc = load_nutrient_dict_simple()
 
     d = st.date_input("기록 날짜", value=date.today())
 
@@ -306,68 +261,35 @@ def main():
         val = st.text_area(slot, height=70, placeholder=f"{slot}에 먹은 것 입력",
                            key=f"ta_{slot}", value=st.session_state.inputs.get(slot, ""))
         st.session_state.inputs[slot] = val
-
-        cond = st.text_input(f"{slot} 컨디션", placeholder="예: 양호 / 피곤함 / 복부팽만",
+        cond = st.text_input(f"{slot} 컨디션", placeholder="예: 피곤함 / 복부팽만 / 양호",
                              key=f"cond_{slot}", value=st.session_state.conditions.get(slot, ""))
         st.session_state.conditions[slot] = cond
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        st.number_input("충족 임계(수량합)", min_value=1, max_value=5,
-                        value=st.session_state.get("threshold", 1),
-                        step=1, key="threshold")
-    with c2:
-        st.checkbox("log.csv 저장", value=st.session_state.get("export_flag", True), key="export_flag")
-    with c3:
-        analyze_clicked = st.button("분석하기", type="primary", key="analyze_btn")
-
-    save_state_to_url()
+    analyze_clicked = st.button("분석하기", type="primary")
 
     if analyze_clicked:
-        all_items, all_logs, total_counts, all_unmatched = [], [], defaultdict(float), []
+        all_items, total_counts = [], defaultdict(float)
         for slot in SLOTS:
-            items_df, counts, log_df, unmatched = analyze_items_for_slot(
+            items_df, counts, _, _ = analyze_items_for_slot(
                 st.session_state.inputs.get(slot, ""), slot, df_food, nutrient_desc,
                 condition=st.session_state.conditions.get(slot, "")
             )
             if not items_df.empty:
                 items_df["날짜"] = d.isoformat()
             all_items.append(items_df)
-            all_logs.append(log_df)
-            all_unmatched += unmatched
             for k, v in counts.items():
                 total_counts[k] += v
-
         items_df_all = pd.concat(all_items, ignore_index=True) if all_items else pd.DataFrame()
-        logs_all = pd.concat(all_logs, ignore_index=True) if all_logs else pd.DataFrame()
-
-        if st.session_state.export_flag and not logs_all.empty:
-            try:
-                try:
-                    prev = pd.read_csv(LOG_CSV)
-                    merged = pd.concat([prev, logs_all], ignore_index=True)
-                except Exception:
-                    merged = logs_all.copy()
-                merged = merged.drop_duplicates(
-                    subset=["date","slot","입력항목","매칭식품","등급","태그","컨디션"], keep="last"
-                )
-                merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
-                st.success("log.csv 저장 완료")
-            except Exception as e:
-                st.error(f"log.csv 저장 오류: {e}")
-
         st.session_state.last_items_df = items_df_all
 
-        # ✅ 컨디션+영양 태그 기반 다음 식사 제안 (클릭형)
+        # ✅ 컨디션+영양 태그 기반 다음 식사 제안 (버튼 유지형)
         st.markdown("### 🍽 개인화된 다음 식사 제안")
-
         total_tags = []
         if not items_df_all.empty and "태그" in items_df_all.columns:
             for tags in items_df_all["태그"].dropna():
                 total_tags += [t.strip() for t in str(tags).split(",") if t.strip()]
         tag_counts = pd.Series(total_tags).value_counts().to_dict() if total_tags else {}
 
-        suggestions = []
         for slot in SLOTS:
             cond = st.session_state.conditions.get(slot, "")
             if not cond.strip():
@@ -375,43 +297,29 @@ def main():
             needed_tags = condition_to_nutrients(cond)
             suggested_foods = []
             for tag in needed_tags:
-                # 현재 태그 섭취량이 임계치보다 적으면 보완 제안
                 if tag_counts.get(tag, 0) < st.session_state.threshold:
-                    foods = NUTRIENT_TO_FOODS.get(tag, [])
-                    if foods:
-                        suggested_foods += foods
-            suggestions.append((slot, cond, list(dict.fromkeys(suggested_foods[:5]))))
+                    suggested_foods += NUTRIENT_TO_FOODS.get(tag, [])
+            suggested_foods = list(dict.fromkeys(suggested_foods[:5]))
 
-        if suggestions:
-            for slot, cond, foods in suggestions:
-                if foods:
-                    st.markdown(f"#### 🩺 {slot} 컨디션: {cond}")
-                    cols = st.columns(len(foods))
-                    for i, food in enumerate(foods):
-                        with cols[i]:
-                            if st.button(food, key=f"suggest_btn_{slot}_{food}"):
-                                show_food_details(food, df_food, nutrient_desc)
-                else:
-                    if cond.strip():
-                        st.info(f"{slot} 컨디션({cond}) → 현재 식단 균형 양호")
-        else:
-            st.info("오늘 기록된 컨디션이 없습니다.")
+            if suggested_foods:
+                st.markdown(f"#### 🩺 {slot} 컨디션: {cond}")
+                cols = st.columns(len(suggested_foods))
+                for i, food in enumerate(suggested_foods):
+                    with cols[i]:
+                        btn_key = f"suggest_btn_{slot}_{food}"
+                        exp_key = f"show_{slot}_{food}"
+                        if st.button(food, key=btn_key):
+                            st.session_state[exp_key] = not st.session_state.get(exp_key, False)
+                        if st.session_state.get(exp_key, False):
+                            show_food_details(food, df_food, nutrient_desc)
+            else:
+                st.info(f"{slot} 컨디션({cond}) → 현재 식단 균형 양호")
 
-    # ================== 결과 표 영역 ==================
     st.markdown("### 🍱 슬롯별 매칭 결과")
-    if st.session_state.last_items_df is None or st.session_state.last_items_df.empty:
-        st.info("매칭된 항목이 없습니다.")
+    if st.session_state.last_items_df is not None and not st.session_state.last_items_df.empty:
+        st.dataframe(st.session_state.last_items_df, use_container_width=True)
     else:
-        cols = ["날짜","슬롯","입력항목","수량","매칭식품","등급","태그"]
-        if "컨디션" in st.session_state.last_items_df.columns:
-            cols.append("컨디션")
-        # 존재하는 컬럼만 표시(방어적)
-        cols = [c for c in cols if c in st.session_state.last_items_df.columns]
-        st.dataframe(
-            st.session_state.last_items_df[cols],
-            use_container_width=True,
-            height=min(420, 36*(len(st.session_state.last_items_df)+1))
-        )
+        st.info("매칭된 항목이 없습니다.")
 
 if __name__ == "__main__":
     if st is None:
