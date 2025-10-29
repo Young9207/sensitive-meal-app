@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py
-- 하루 동안 + 앱 꺼져도 입력 유지 (state_cache.json 저장)
-- 자정 지나면 자동 초기화
+diet_analyzer.py (integrated version)
+- log.csv 기반 자동 복원 (앱 꺼도 유지)
+- 자정 단위 초기화
 - 컨디션 selectbox + 직접 입력
-- 날짜 선택 / 제안 / 클릭 세부정보 모두 유지
+- 클릭형 제안 (리스트 안 사라짐)
+- 날짜 선택 포함
 """
 
 from __future__ import annotations
-import re, sys, ast, json, os
+import re, sys, ast, json
 from collections import defaultdict
 from typing import List, Dict, Tuple, Any
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
+import os
 
 try:
     import streamlit as st
@@ -25,7 +27,6 @@ except Exception:
 FOOD_DB_CSV = "food_db.csv"
 NUTRIENT_DICT_CSV = "nutrient_dict.csv"
 LOG_CSV = "log.csv"
-STATE_CACHE = "state_cache.json"  # ✅ 새로 추가된 상태 저장 파일
 
 SLOTS = ["아침", "아침보조제", "오전 간식", "점심", "점심보조제",
          "오후 간식", "저녁", "저녁보조제", "저녁 간식"]
@@ -40,52 +41,37 @@ def next_midnight():
     now = datetime.now(TZ)
     return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=TZ)
 
-def load_cached_state() -> dict:
-    """state_cache.json에서 마지막 입력 복원"""
-    if os.path.exists(STATE_CACHE):
-        try:
-            with open(STATE_CACHE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_cached_state():
-    """현재 session_state를 state_cache.json에 저장"""
-    try:
-        data = {
-            "date": st.session_state.get("daily_date"),
-            "inputs": st.session_state.get("inputs", {}),
-            "conditions": st.session_state.get("conditions", {}),
-            "selected_date": st.session_state.get("selected_date", str(date.today())),
-        }
-        with open(STATE_CACHE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        st.warning(f"⚠️ 상태 저장 실패: {e}")
-
 def init_daily_state():
-    """자정 기준 상태 초기화 + 저장된 캐시 복원"""
-    cached = load_cached_state()
-    today = today_str()
-    prev_date = cached.get("date")
-
+    """자정 단위로 상태를 유지하고, log.csv를 통해 복원"""
     if "daily_date" not in st.session_state:
-        st.session_state.daily_date = today
-
-    # 날짜 바뀌면 초기화
-    if st.session_state.daily_date != today or prev_date != today:
+        st.session_state.daily_date = today_str()
+    if st.session_state.daily_date != today_str():
         for k in ["inputs", "conditions", "last_items_df", "last_clicked_foods", "analyzed"]:
             st.session_state.pop(k, None)
-        st.session_state.daily_date = today
+        st.session_state.daily_date = today_str()
 
-    # 기본값
-    st.session_state.setdefault("inputs", cached.get("inputs", {s: "" for s in SLOTS}))
-    st.session_state.setdefault("conditions", cached.get("conditions", {s: "" for s in SLOTS}))
+    st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
+    st.session_state.setdefault("conditions", {s: "" for s in SLOTS})
     st.session_state.setdefault("last_items_df", None)
     st.session_state.setdefault("last_clicked_foods", set())
     st.session_state.setdefault("analyzed", False)
     st.session_state.setdefault("selected_date", date.today())
+
+    # ✅ log.csv에서 오늘 날짜의 최신 입력 복원
+    try:
+        if os.path.exists(LOG_CSV):
+            df_log = pd.read_csv(LOG_CSV)
+            today_logs = df_log[df_log["date"] == today_str()]
+            if not today_logs.empty:
+                for slot in SLOTS:
+                    slot_logs = today_logs[today_logs["slot"] == slot]
+                    if not slot_logs.empty:
+                        latest = slot_logs.sort_values("timestamp").tail(1).iloc[0]
+                        st.session_state.inputs[slot] = str(latest.get("입력항목", "") or "")
+                        st.session_state.conditions[slot] = str(latest.get("컨디션", "") or "")
+                st.session_state.last_items_df = today_logs.rename(columns={"slot": "슬롯", "date": "날짜"})
+    except Exception as e:
+        st.warning(f"⚠️ log.csv 복원 실패: {e}")
 
 # ==================== 유틸 ====================
 def _parse_tags_from_slash(cell):
@@ -113,12 +99,20 @@ def match_item_to_foods(item, df_food):
 # ================== 분석 함수 ==================
 def analyze_items_for_slot(input_text, slot, df_food, condition=""):
     items = split_items(input_text)
-    per_item_rows, nutrient_counts = [], defaultdict(float)
+    per_item_rows, nutrient_counts, log_rows = [], defaultdict(float), []
+
     for raw in items:
         matched = match_item_to_foods(raw, df_food)
+        timestamp = datetime.now(TZ).isoformat(timespec="seconds")
+
         if matched.empty:
             per_item_rows.append({"슬롯": slot, "입력항목": raw, "매칭식품": "", "태그": "", "컨디션": condition})
+            log_rows.append({
+                "timestamp": timestamp, "date": today_str(), "time": timestamp.split("T")[1],
+                "slot": slot, "입력항목": raw, "매칭식품": "", "등급": "", "태그": "", "컨디션": condition
+            })
             continue
+
         tag_union, matched_names = [], []
         for _, r in matched.iterrows():
             name = str(r["식품"])
@@ -127,13 +121,18 @@ def analyze_items_for_slot(input_text, slot, df_food, condition=""):
             for t in tags:
                 tag_union.append(t)
                 nutrient_counts[t] += 1
+
         per_item_rows.append({
-            "슬롯": slot, "입력항목": raw,
-            "매칭식품": ", ".join(matched_names),
-            "태그": ", ".join(tag_union),
-            "컨디션": condition
+            "슬롯": slot, "입력항목": raw, "매칭식품": ", ".join(matched_names),
+            "태그": ", ".join(tag_union), "컨디션": condition
         })
-    return pd.DataFrame(per_item_rows), dict(nutrient_counts)
+        log_rows.append({
+            "timestamp": timestamp, "date": today_str(), "time": timestamp.split("T")[1],
+            "slot": slot, "입력항목": raw, "매칭식품": ", ".join(matched_names),
+            "등급": "", "태그": ", ".join(tag_union), "컨디션": condition
+        })
+
+    return pd.DataFrame(per_item_rows), dict(nutrient_counts), pd.DataFrame(log_rows)
 
 # ================== 컨디션 → 태그 매핑 ==================
 def condition_to_nutrients(condition: str) -> List[str]:
@@ -207,21 +206,35 @@ def main():
         else:
             st.session_state.conditions[slot] = selected
 
-    # 🔄 매번 상태 저장
-    save_cached_state()
-
-    # 분석 유지형
+    # 분석하기 버튼
     if st.button("분석하기", type="primary"):
         st.session_state.analyzed = True
         st.session_state.last_clicked_foods.clear()
-        save_cached_state()
+
+        # log.csv에 저장
+        all_logs = []
+        for slot in SLOTS:
+            _, _, log_df = analyze_items_for_slot(
+                st.session_state.inputs.get(slot, ""),
+                slot, df_food, st.session_state.conditions.get(slot, "")
+            )
+            all_logs.append(log_df)
+        if all_logs:
+            logs_all = pd.concat(all_logs, ignore_index=True)
+            try:
+                prev = pd.read_csv(LOG_CSV) if os.path.exists(LOG_CSV) else pd.DataFrame()
+                merged = pd.concat([prev, logs_all], ignore_index=True)
+                merged.drop_duplicates(subset=["date", "slot", "입력항목", "매칭식품", "태그", "컨디션"], keep="last", inplace=True)
+                merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
+                st.success("✅ log.csv 저장 완료 — 재실행 시 복원됨")
+            except Exception as e:
+                st.error(f"log.csv 저장 오류: {e}")
 
     if st.session_state.analyzed:
         all_items, total_counts = [], defaultdict(float)
         for slot in SLOTS:
-            items_df, counts = analyze_items_for_slot(
-                st.session_state.inputs.get(slot, ""),
-                slot, df_food, st.session_state.conditions.get(slot, "")
+            items_df, counts, _ = analyze_items_for_slot(
+                st.session_state.inputs.get(slot, ""), slot, df_food, st.session_state.conditions.get(slot, "")
             )
             if not items_df.empty:
                 items_df["날짜"] = st.session_state.selected_date.strftime("%Y-%m-%d")
@@ -255,7 +268,6 @@ def main():
                     with cols[i]:
                         if st.button(food, key=f"suggest_btn_{slot}_{food}"):
                             st.session_state.last_clicked_foods.add(food)
-                            save_cached_state()
 
         if st.session_state.last_clicked_foods:
             st.markdown("### 🔍 선택한 식품 세부정보")
