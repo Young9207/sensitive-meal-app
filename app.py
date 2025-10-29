@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 diet_analyzer.py
-- 하루 동안 입력값 유지 (자정 초기화)
-- 컨디션 선택(selectbox) + 직접 입력
-- 날짜 선택 가능
-- 클릭해도 제안/입력값 유지
-- 제안된 식품 클릭 시 세부정보 표시 (닫히지 않음)
+- 하루 동안 + 앱 꺼져도 입력 유지 (state_cache.json 저장)
+- 자정 지나면 자동 초기화
+- 컨디션 selectbox + 직접 입력
+- 날짜 선택 / 제안 / 클릭 세부정보 모두 유지
 """
 
 from __future__ import annotations
-import re, sys, ast, json
+import re, sys, ast, json, os
 from collections import defaultdict
 from typing import List, Dict, Tuple, Any
 from datetime import datetime, date, timedelta
@@ -26,6 +25,7 @@ except Exception:
 FOOD_DB_CSV = "food_db.csv"
 NUTRIENT_DICT_CSV = "nutrient_dict.csv"
 LOG_CSV = "log.csv"
+STATE_CACHE = "state_cache.json"  # ✅ 새로 추가된 상태 저장 파일
 
 SLOTS = ["아침", "아침보조제", "오전 간식", "점심", "점심보조제",
          "오후 간식", "저녁", "저녁보조제", "저녁 간식"]
@@ -40,21 +40,48 @@ def next_midnight():
     now = datetime.now(TZ)
     return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=TZ)
 
-def init_daily_state():
-    """자정 단위로 상태 유지. 날짜 바뀌면 자동 초기화"""
-    if "daily_date" not in st.session_state:
-        st.session_state.daily_date = today_str()
-    if st.session_state.daily_date != today_str():
-        for k in [
-            "inputs", "conditions", "last_items_df",
-            "last_clicked_foods", "analyzed", "selected_date"
-        ]:
-            st.session_state.pop(k, None)
-        st.session_state.daily_date = today_str()
+def load_cached_state() -> dict:
+    """state_cache.json에서 마지막 입력 복원"""
+    if os.path.exists(STATE_CACHE):
+        try:
+            with open(STATE_CACHE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-    # 하루 유지되는 기본 상태
-    st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
-    st.session_state.setdefault("conditions", {s: "" for s in SLOTS})
+def save_cached_state():
+    """현재 session_state를 state_cache.json에 저장"""
+    try:
+        data = {
+            "date": st.session_state.get("daily_date"),
+            "inputs": st.session_state.get("inputs", {}),
+            "conditions": st.session_state.get("conditions", {}),
+            "selected_date": st.session_state.get("selected_date", str(date.today())),
+        }
+        with open(STATE_CACHE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"⚠️ 상태 저장 실패: {e}")
+
+def init_daily_state():
+    """자정 기준 상태 초기화 + 저장된 캐시 복원"""
+    cached = load_cached_state()
+    today = today_str()
+    prev_date = cached.get("date")
+
+    if "daily_date" not in st.session_state:
+        st.session_state.daily_date = today
+
+    # 날짜 바뀌면 초기화
+    if st.session_state.daily_date != today or prev_date != today:
+        for k in ["inputs", "conditions", "last_items_df", "last_clicked_foods", "analyzed"]:
+            st.session_state.pop(k, None)
+        st.session_state.daily_date = today
+
+    # 기본값
+    st.session_state.setdefault("inputs", cached.get("inputs", {s: "" for s in SLOTS}))
+    st.session_state.setdefault("conditions", cached.get("conditions", {s: "" for s in SLOTS}))
     st.session_state.setdefault("last_items_df", None)
     st.session_state.setdefault("last_clicked_foods", set())
     st.session_state.setdefault("analyzed", False)
@@ -65,16 +92,6 @@ def _parse_tags_from_slash(cell):
     if pd.isna(cell): return []
     return [t.strip() for t in str(cell).split('/') if t.strip()]
 
-def _parse_taglist_cell(cell: Any):
-    if isinstance(cell, list): return [str(x).strip() for x in cell if str(x).strip()]
-    s = str(cell).strip() if cell else ""
-    if not s or s == "[]": return []
-    try:
-        v = ast.literal_eval(s)
-        if isinstance(v, list): return [str(x).strip() for x in v if str(x).strip()]
-    except: pass
-    return [p.strip() for p in re.split(r"[,/]", s.strip("[]")) if p.strip()]
-
 def load_food_db_simple(path=FOOD_DB_CSV):
     df = pd.read_csv(path)
     df["태그리스트"] = df.get("태그리스트", df.get("태그(영양)", "")).apply(_parse_tags_from_slash)
@@ -84,7 +101,6 @@ def load_nutrient_dict_simple(path=NUTRIENT_DICT_CSV):
     nd = pd.read_csv(path)
     return {str(r["영양소"]).strip(): str(r["한줄설명"]).strip() for _, r in nd.iterrows()}
 
-# ================== 분석 함수 ==================
 def split_items(text: str) -> List[str]:
     if not text: return []
     return [p.strip() for p in re.split(r"[,|\n|(|)]+", text) if p.strip()]
@@ -94,6 +110,7 @@ def match_item_to_foods(item, df_food):
     hits = df_food[df_food["식품"].apply(lambda x: it in str(x) or str(x) in it)]
     return hits[hits["식품"].str.len() > 0]
 
+# ================== 분석 함수 ==================
 def analyze_items_for_slot(input_text, slot, df_food, condition=""):
     items = split_items(input_text)
     per_item_rows, nutrient_counts = [], defaultdict(float)
@@ -178,24 +195,26 @@ def main():
     condition_options = ["양호", "피곤함", "복부팽만", "속쓰림", "두통", "불면", "변비", "설사", "직접 입력"]
 
     for slot in SLOTS:
-        # ✅ key 기반으로 입력값 보존
         st.text_area(slot, height=60, placeholder=f"{slot} 식단 입력", key=f"input_{slot}")
         st.session_state.inputs[slot] = st.session_state.get(f"input_{slot}", "")
 
         prev_cond = st.session_state.conditions.get(slot, "")
         default_index = condition_options.index(prev_cond) if prev_cond in condition_options else len(condition_options) - 1
         selected = st.selectbox(f"{slot} 컨디션", condition_options, index=default_index, key=f"cond_select_{slot}")
-
         if selected == "직접 입력":
             st.text_input(f"{slot} 컨디션 직접 입력", key=f"cond_input_{slot}")
             st.session_state.conditions[slot] = st.session_state.get(f"cond_input_{slot}", "")
         else:
             st.session_state.conditions[slot] = selected
 
+    # 🔄 매번 상태 저장
+    save_cached_state()
+
     # 분석 유지형
     if st.button("분석하기", type="primary"):
         st.session_state.analyzed = True
         st.session_state.last_clicked_foods.clear()
+        save_cached_state()
 
     if st.session_state.analyzed:
         all_items, total_counts = [], defaultdict(float)
@@ -236,6 +255,7 @@ def main():
                     with cols[i]:
                         if st.button(food, key=f"suggest_btn_{slot}_{food}"):
                             st.session_state.last_clicked_foods.add(food)
+                            save_cached_state()
 
         if st.session_state.last_clicked_foods:
             st.markdown("### 🔍 선택한 식품 세부정보")
