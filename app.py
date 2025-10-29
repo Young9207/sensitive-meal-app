@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py (selectable condition + persistent suggestions + non-toggle details)
+diet_analyzer.py
+- 컨디션 선택(selectbox)
+- 클릭 시 제안 유지
+- 세부정보 닫히지 않음
+- 날짜 선택/저장 기능 포함
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ def init_daily_state():
     if "daily_date" not in st.session_state:
         st.session_state.daily_date = today_str()
     if st.session_state.daily_date != today_str():
-        for k in ["inputs", "conditions", "last_items_df", "last_clicked_foods", "analyzed"]:
+        for k in ["inputs", "conditions", "last_items_df", "last_clicked_foods", "analyzed", "selected_date"]:
             st.session_state.pop(k, None)
         st.session_state.daily_date = today_str()
 
@@ -44,6 +48,7 @@ def init_daily_state():
     st.session_state.setdefault("last_items_df", None)
     st.session_state.setdefault("last_clicked_foods", set())
     st.session_state.setdefault("analyzed", False)
+    st.session_state.setdefault("selected_date", date.today())
 
 # ==================== 유틸 ====================
 def _parse_tags_from_slash(cell):
@@ -156,6 +161,10 @@ def main():
     df_food = load_food_db_simple()
     nutrient_desc = load_nutrient_dict_simple()
 
+    # ✅ 날짜 선택
+    st.session_state.selected_date = st.date_input("기록 날짜", value=st.session_state.get("selected_date", date.today()))
+    st.caption(f"선택된 날짜: {st.session_state.selected_date.strftime('%Y-%m-%d')}")
+
     condition_options = ["양호", "피곤함", "복부팽만", "속쓰림", "두통", "불면", "변비", "설사", "직접 입력"]
 
     for slot in SLOTS:
@@ -185,6 +194,8 @@ def main():
                 st.session_state.inputs.get(slot, ""), slot, df_food,
                 st.session_state.conditions.get(slot, "")
             )
+            if not items_df.empty:
+                items_df["날짜"] = st.session_state.selected_date.strftime("%Y-%m-%d")
             all_items.append(items_df)
             for k, v in counts.items():
                 total_counts[k] += v
