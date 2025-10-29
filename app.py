@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 diet_analyzer.py
-- 컨디션 선택(selectbox)
-- 클릭 시 제안 유지
-- 세부정보 닫히지 않음
-- 날짜 선택/저장 기능 포함
+- 하루 동안 입력값 유지 (자정 초기화)
+- 컨디션 선택(selectbox) + 직접 입력
+- 날짜 선택 가능
+- 클릭해도 제안/입력값 유지
+- 제안된 식품 클릭 시 세부정보 표시 (닫히지 않음)
 """
 
 from __future__ import annotations
@@ -31,18 +32,27 @@ SLOTS = ["아침", "아침보조제", "오전 간식", "점심", "점심보조�
 
 TZ = ZoneInfo("Europe/Paris")
 
-# ==================== 날짜/상태 ====================
+# ==================== 날짜/상태 관리 ====================
 def today_str() -> str:
     return datetime.now(TZ).date().isoformat()
 
+def next_midnight():
+    now = datetime.now(TZ)
+    return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=TZ)
+
 def init_daily_state():
+    """자정 단위로 상태 유지. 날짜 바뀌면 자동 초기화"""
     if "daily_date" not in st.session_state:
         st.session_state.daily_date = today_str()
     if st.session_state.daily_date != today_str():
-        for k in ["inputs", "conditions", "last_items_df", "last_clicked_foods", "analyzed", "selected_date"]:
+        for k in [
+            "inputs", "conditions", "last_items_df",
+            "last_clicked_foods", "analyzed", "selected_date"
+        ]:
             st.session_state.pop(k, None)
         st.session_state.daily_date = today_str()
 
+    # 하루 유지되는 기본 상태
     st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
     st.session_state.setdefault("conditions", {s: "" for s in SLOTS})
     st.session_state.setdefault("last_items_df", None)
@@ -161,28 +171,28 @@ def main():
     df_food = load_food_db_simple()
     nutrient_desc = load_nutrient_dict_simple()
 
-    # ✅ 날짜 선택
-    st.session_state.selected_date = st.date_input("기록 날짜", value=st.session_state.get("selected_date", date.today()))
-    st.caption(f"선택된 날짜: {st.session_state.selected_date.strftime('%Y-%m-%d')}")
+    st.session_state.selected_date = st.date_input("기록 날짜", value=st.session_state.selected_date)
+    remain = next_midnight() - datetime.now(TZ)
+    st.caption(f"입력값은 자정까지 보존됩니다 (남은 {remain.seconds//3600}시간 {remain.seconds%3600//60}분)")
 
     condition_options = ["양호", "피곤함", "복부팽만", "속쓰림", "두통", "불면", "변비", "설사", "직접 입력"]
 
     for slot in SLOTS:
-        val = st.text_area(slot, height=60, placeholder=f"{slot} 식단 입력", value=st.session_state.inputs.get(slot, ""))
-        st.session_state.inputs[slot] = val
+        # ✅ key 기반으로 입력값 보존
+        st.text_area(slot, height=60, placeholder=f"{slot} 식단 입력", key=f"input_{slot}")
+        st.session_state.inputs[slot] = st.session_state.get(f"input_{slot}", "")
 
         prev_cond = st.session_state.conditions.get(slot, "")
         default_index = condition_options.index(prev_cond) if prev_cond in condition_options else len(condition_options) - 1
         selected = st.selectbox(f"{slot} 컨디션", condition_options, index=default_index, key=f"cond_select_{slot}")
+
         if selected == "직접 입력":
-            cond_input = st.text_input(f"{slot} 컨디션 직접 입력", value=prev_cond if prev_cond not in condition_options else "")
-            st.session_state.conditions[slot] = cond_input
+            st.text_input(f"{slot} 컨디션 직접 입력", key=f"cond_input_{slot}")
+            st.session_state.conditions[slot] = st.session_state.get(f"cond_input_{slot}", "")
         else:
             st.session_state.conditions[slot] = selected
 
-    # -------------------------------
-    # 분석하기 버튼 (상태 유지형)
-    # -------------------------------
+    # 분석 유지형
     if st.button("분석하기", type="primary"):
         st.session_state.analyzed = True
         st.session_state.last_clicked_foods.clear()
@@ -191,8 +201,8 @@ def main():
         all_items, total_counts = [], defaultdict(float)
         for slot in SLOTS:
             items_df, counts = analyze_items_for_slot(
-                st.session_state.inputs.get(slot, ""), slot, df_food,
-                st.session_state.conditions.get(slot, "")
+                st.session_state.inputs.get(slot, ""),
+                slot, df_food, st.session_state.conditions.get(slot, "")
             )
             if not items_df.empty:
                 items_df["날짜"] = st.session_state.selected_date.strftime("%Y-%m-%d")
@@ -202,7 +212,6 @@ def main():
         items_df_all = pd.concat(all_items, ignore_index=True) if all_items else pd.DataFrame()
         st.session_state.last_items_df = items_df_all
 
-        # 🍽 제안 섹션
         st.markdown("### 🍽 개인화된 다음 식사 제안")
         total_tags = []
         if not items_df_all.empty and "태그" in items_df_all.columns:
@@ -220,7 +229,6 @@ def main():
                 if tag_counts.get(tag, 0) < 1:
                     suggested_foods += NUTRIENT_TO_FOODS.get(tag, [])
             suggested_foods = list(dict.fromkeys(suggested_foods[:5]))
-
             if suggested_foods:
                 st.markdown(f"#### 🩺 {slot} 컨디션: {cond}")
                 cols = st.columns(len(suggested_foods))
@@ -229,13 +237,11 @@ def main():
                         if st.button(food, key=f"suggest_btn_{slot}_{food}"):
                             st.session_state.last_clicked_foods.add(food)
 
-        # 🔍 클릭된 식품 세부정보 표시
         if st.session_state.last_clicked_foods:
             st.markdown("### 🔍 선택한 식품 세부정보")
             for food in sorted(st.session_state.last_clicked_foods):
                 show_food_details(food, df_food, nutrient_desc)
 
-    # 결과표
     st.markdown("### 🍱 슬롯별 매칭 결과")
     if st.session_state.last_items_df is not None and not st.session_state.last_items_df.empty:
         st.dataframe(st.session_state.last_items_df, use_container_width=True)
