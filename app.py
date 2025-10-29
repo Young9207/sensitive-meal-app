@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py (fixed)
-- 각 식사 슬롯별 컨디션 입력 가능
-- log.csv / URL 상태 / 화면 표시 모두 반영
-- 무한복사 현상 방지 (최신 1건만 복원)
+diet_analyzer.py (with condition-based personalized suggestions + clickable details)
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ def init_daily_state():
         st.session_state.daily_date = today_str()
 
     st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
-    st.session_state.setdefault("conditions", {s: "" for s in SLOTS})  # ✅ 컨디션 추가
+    st.session_state.setdefault("conditions", {s: "" for s in SLOTS})
     st.session_state.setdefault("last_items_df", None)
     st.session_state.setdefault("last_nutri_df", None)
     st.session_state.setdefault("last_recs", [])
@@ -57,7 +54,7 @@ def init_daily_state():
     st.session_state.setdefault("threshold", 1)
     st.session_state.setdefault("export_flag", True)
 
-    # ✅ log.csv에서 오늘 날짜의 최신 1건씩 복원 (무한복사 방지)
+    # ✅ log.csv에서 오늘 날짜의 최신 1건씩 복원
     try:
         df_log = pd.read_csv(LOG_CSV)
         today_logs = df_log[df_log["date"] == today_str()]
@@ -214,7 +211,7 @@ def _b64_decode(s: str) -> dict | None:
 def save_state_to_url():
     data = {
         "inputs": st.session_state.get("inputs", {}),
-        "conditions": st.session_state.get("conditions", {}),  # ✅ 추가
+        "conditions": st.session_state.get("conditions", {}),
         "threshold": st.session_state.get("threshold", 1),
         "export_flag": st.session_state.get("export_flag", True),
         "daily_date": st.session_state.get("daily_date", None)
@@ -232,6 +229,62 @@ def load_state_from_url():
     st.session_state.conditions = decoded.get("conditions", {})
     st.session_state.threshold = decoded.get("threshold", 1)
     st.session_state.export_flag = decoded.get("export_flag", True)
+
+# ================== 컨디션 → 태그 매핑 ==================
+def condition_to_nutrients(condition: str) -> List[str]:
+    cond = condition.lower()
+    needs = []
+    if any(k in cond for k in ["피곤", "무기력", "기운 없음"]):
+        needs += ["단백질", "비타민B", "철분"]
+    if any(k in cond for k in ["복부팽만", "더부룩", "소화불량"]):
+        needs += ["저FODMAP", "식이섬유(적당량)"]
+    if any(k in cond for k in ["속쓰림", "위산"]):
+        needs += ["저지방", "저산성"]
+    if "두통" in cond or "어지럽" in cond:
+        needs += ["마그네슘", "수분"]
+    if "불면" in cond or "수면" in cond:
+        needs += ["트립토판", "칼슘"]
+    if "변비" in cond:
+        needs += ["식이섬유", "수분"]
+    if "설사" in cond:
+        needs += ["전해질", "수분"]
+    return list(dict.fromkeys(needs))
+
+# ================== 태그 → 식품군 추천 ==================
+NUTRIENT_TO_FOODS = {
+    "단백질": ["달걀", "닭가슴살", "두부", "그릭요거트", "생선"],
+    "비타민B": ["현미", "통곡물빵", "콩류", "계란노른자"],
+    "철분": ["시금치", "간", "붉은살생선", "렌틸콩"],
+    "저FODMAP": ["호박", "당근", "감자", "쌀밥"],
+    "식이섬유": ["귀리", "통곡물", "사과", "브로콜리"],
+    "식이섬유(적당량)": ["당근", "호박죽", "바나나"],
+    "저지방": ["찐감자", "닭가슴살", "두부", "저지방요거트"],
+    "저산성": ["바나나", "감자", "두유", "흰죽"],
+    "마그네슘": ["견과류", "시금치", "카카오닙스"],
+    "수분": ["국물", "과일", "물", "수프"],
+    "트립토판": ["달걀", "귀리", "바나나", "아보카도"],
+    "칼슘": ["요거트", "멸치", "치즈", "두유"],
+    "전해질": ["바나나", "소금간 국물", "미음"]
+}
+
+# ================== 식품 세부정보 표시 ==================
+def show_food_details(food: str, df_food: pd.DataFrame, nutrient_desc: Dict[str, str]):
+    matches = df_food[df_food["식품"].str.contains(food, case=False, na=False)]
+    if matches.empty:
+        st.warning(f"'{food}' 정보 없음")
+        return
+    with st.expander(f"🍽 {food} 세부정보 보기"):
+        for _, row in matches.iterrows():
+            grade = row.get("등급", "정보없음")
+            tags = row.get("태그리스트", [])
+            if not tags:
+                tags = _parse_taglist_cell(row.get("태그(영양)", ""))
+            st.write(f"**등급:** {grade}")
+            st.write(f"**영양 태그:** {', '.join(tags) if tags else '없음'}")
+            for t in tags:
+                desc = nutrient_desc.get(t, "")
+                if desc:
+                    st.caption(f"• {t}: {desc}")
 
 # ==================== Streamlit UI ====================
 def main():
@@ -299,12 +352,52 @@ def main():
                     subset=["date","slot","입력항목","매칭식품","등급","태그","컨디션"], keep="last"
                 )
                 merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
-                st.success(f"log.csv 저장 완료")
+                st.success("log.csv 저장 완료")
             except Exception as e:
                 st.error(f"log.csv 저장 오류: {e}")
 
         st.session_state.last_items_df = items_df_all
 
+        # ✅ 컨디션+영양 태그 기반 다음 식사 제안 (클릭형)
+        st.markdown("### 🍽 개인화된 다음 식사 제안")
+
+        total_tags = []
+        if not items_df_all.empty and "태그" in items_df_all.columns:
+            for tags in items_df_all["태그"].dropna():
+                total_tags += [t.strip() for t in str(tags).split(",") if t.strip()]
+        tag_counts = pd.Series(total_tags).value_counts().to_dict() if total_tags else {}
+
+        suggestions = []
+        for slot in SLOTS:
+            cond = st.session_state.conditions.get(slot, "")
+            if not cond.strip():
+                continue
+            needed_tags = condition_to_nutrients(cond)
+            suggested_foods = []
+            for tag in needed_tags:
+                # 현재 태그 섭취량이 임계치보다 적으면 보완 제안
+                if tag_counts.get(tag, 0) < st.session_state.threshold:
+                    foods = NUTRIENT_TO_FOODS.get(tag, [])
+                    if foods:
+                        suggested_foods += foods
+            suggestions.append((slot, cond, list(dict.fromkeys(suggested_foods[:5]))))
+
+        if suggestions:
+            for slot, cond, foods in suggestions:
+                if foods:
+                    st.markdown(f"#### 🩺 {slot} 컨디션: {cond}")
+                    cols = st.columns(len(foods))
+                    for i, food in enumerate(foods):
+                        with cols[i]:
+                            if st.button(food, key=f"suggest_btn_{slot}_{food}"):
+                                show_food_details(food, df_food, nutrient_desc)
+                else:
+                    if cond.strip():
+                        st.info(f"{slot} 컨디션({cond}) → 현재 식단 균형 양호")
+        else:
+            st.info("오늘 기록된 컨디션이 없습니다.")
+
+    # ================== 결과 표 영역 ==================
     st.markdown("### 🍱 슬롯별 매칭 결과")
     if st.session_state.last_items_df is None or st.session_state.last_items_df.empty:
         st.info("매칭된 항목이 없습니다.")
@@ -312,9 +405,13 @@ def main():
         cols = ["날짜","슬롯","입력항목","수량","매칭식품","등급","태그"]
         if "컨디션" in st.session_state.last_items_df.columns:
             cols.append("컨디션")
-        st.dataframe(st.session_state.last_items_df[cols],
-                     use_container_width=True,
-                     height=min(420, 36*(len(st.session_state.last_items_df)+1)))
+        # 존재하는 컬럼만 표시(방어적)
+        cols = [c for c in cols if c in st.session_state.last_items_df.columns]
+        st.dataframe(
+            st.session_state.last_items_df[cols],
+            use_container_width=True,
+            height=min(420, 36*(len(st.session_state.last_items_df)+1))
+        )
 
 if __name__ == "__main__":
     if st is None:
