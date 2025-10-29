@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-diet_analyzer.py
-----------------
-Streamlit 기반 식단 분석 & 다음 식사 제안 도구
-- 각 식사 슬롯별 음식 및 컨디션 입력
-- food_db.csv 기반 영양 태그 분석
-- 부족한 영양소 자동 감지 후 다음 식사 추천
-- log.csv 자동 저장 및 최신 입력 복원 (무한복사 방지)
+diet_analyzer_v3.py
+-------------------
+Streamlit 기반 식단 분석 + 다음 식사 제안
+- 각 식사별 음식 + 컨디션 기록
+- food_db.csv 기반 영양 분석
+- 부족/기본 영양 태그 기반 추천 식품 표시
+- log.csv 자동 저장 및 최신 입력 복원
 """
 
 from __future__ import annotations
@@ -55,13 +55,11 @@ def init_daily_state():
     st.session_state.setdefault("inputs", {s: "" for s in SLOTS})
     st.session_state.setdefault("conditions", {s: "" for s in SLOTS})
     st.session_state.setdefault("last_items_df", None)
-    st.session_state.setdefault("last_nutri_df", None)
     st.session_state.setdefault("last_recs", [])
     st.session_state.setdefault("last_combo", [])
     st.session_state.setdefault("threshold", 1)
     st.session_state.setdefault("export_flag", True)
 
-    # 오늘 날짜 로그 복원
     try:
         df_log = pd.read_csv(LOG_CSV)
         today_logs = df_log[df_log["date"] == today_str()]
@@ -72,16 +70,10 @@ def init_daily_state():
                     latest = slot_logs.sort_values("timestamp").tail(1).iloc[0]
                     st.session_state.inputs[slot] = str(latest.get("입력항목", "") or "")
                     st.session_state.conditions[slot] = str(latest.get("컨디션", "") or "")
-            st.session_state.last_items_df = today_logs.rename(columns={"slot": "슬롯", "date": "날짜"})
     except FileNotFoundError:
         pass
 
 # ==================== CSV 유틸 ====================
-def _parse_tags_from_slash(cell) -> List[str]:
-    if pd.isna(cell):
-        return []
-    return [t.strip() for t in str(cell).split('/') if t.strip()]
-
 def _parse_taglist_cell(cell: Any) -> List[str]:
     if isinstance(cell, list):
         return [str(x).strip() for x in cell if str(x).strip()]
@@ -106,20 +98,14 @@ def _parse_taglist_cell(cell: Any) -> List[str]:
 
 def load_food_db_simple(path: str = FOOD_DB_CSV) -> pd.DataFrame:
     df = pd.read_csv(path)
-    for c in ["식품", "등급", "태그(영양)"]:
-        if c not in df.columns:
-            df[c] = ""
-    if "태그리스트" in df.columns:
-        df["태그리스트"] = df["태그리스트"].apply(_parse_taglist_cell)
+    if "태그리스트" not in df.columns:
+        df["태그리스트"] = df["태그(영양)"].apply(_parse_taglist_cell)
     else:
-        df["태그리스트"] = df["태그(영양)"].apply(_parse_tags_from_slash)
+        df["태그리스트"] = df["태그리스트"].apply(_parse_taglist_cell)
     return df[["식품", "등급", "태그(영양)", "태그리스트"]]
 
 def load_nutrient_dict_simple(path: str = NUTRIENT_DICT_CSV) -> Dict[str, str]:
     nd = pd.read_csv(path)
-    for c in ["영양소", "한줄설명"]:
-        if c not in nd.columns:
-            nd[c] = ""
     return {str(r["영양소"]).strip(): str(r["한줄설명"]).strip() for _, r in nd.iterrows()}
 
 # ==================== 분석 로직 ====================
@@ -141,8 +127,7 @@ def parse_qty(token: str) -> Tuple[str, float]:
 def match_item_to_foods(item: str, df_food: pd.DataFrame) -> pd.DataFrame:
     it = item.strip()
     hits = df_food[df_food["식품"].apply(lambda x: str(x).strip() in it or it in str(x).strip())].copy()
-    hits = hits[hits["식품"].apply(lambda x: len(str(x).strip()) >= 1)]
-    return hits
+    return hits[hits["식품"].apply(lambda x: len(str(x).strip()) >= 1)]
 
 def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame,
                            nutrient_desc: Dict[str, str], condition: str = ""):
@@ -167,14 +152,14 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame,
             unmatched_names.append(raw)
             continue
 
-        agg_grade, tag_union, matched_names = "Safe", [], []
+        tag_union = []
+        matched_names = []
         for _, r in matched.iterrows():
             name = str(r["식품"]).strip()
             grade = str(r["등급"]).strip() or "Safe"
             tags = r.get("태그리스트", [])
             if not isinstance(tags, list):
                 tags = _parse_taglist_cell(tags)
-            agg_grade = "Avoid" if grade == "Avoid" else agg_grade
             matched_names.append(name)
             for t in tags:
                 nutrient_counts[t] += qty
@@ -182,12 +167,12 @@ def analyze_items_for_slot(input_text: str, slot: str, df_food: pd.DataFrame,
 
         per_item_rows.append({"슬롯": slot, "입력항목": raw, "수량": qty,
                               "매칭식품": ", ".join(dict.fromkeys(matched_names)),
-                              "등급": agg_grade, "태그": ", ".join(dict.fromkeys(tag_union)),
+                              "등급": grade, "태그": ", ".join(dict.fromkeys(tag_union)),
                               "컨디션": condition})
         log_rows.append({"timestamp": timestamp, "date": today_str(), "time": timestamp.split("T")[1],
                          "slot": slot, "입력항목": raw, "수량": qty,
                          "매칭식품": ", ".join(dict.fromkeys(matched_names)),
-                         "등급": agg_grade, "태그": ", ".join(dict.fromkeys(tag_union)),
+                         "등급": grade, "태그": ", ".join(dict.fromkeys(tag_union)),
                          "컨디션": condition})
     return pd.DataFrame(per_item_rows), dict(nutrient_counts), pd.DataFrame(log_rows), unmatched_names
 
@@ -197,13 +182,20 @@ def recommend_next_meal(nutrient_counts: Dict[str, float],
                         nutrient_desc: Dict[str, str],
                         threshold: float = 1.0,
                         top_nutrients: int = 3):
-    # 전체 태그 리스트
     all_tags = sorted({t for lst in df_food["태그리스트"] for t in lst})
     deficits = {t: max(0, threshold - nutrient_counts.get(t, 0)) for t in all_tags if nutrient_counts.get(t, 0) < threshold}
-    if not deficits:
-        return [], []
-    focus_tags = sorted(deficits.items(), key=lambda x: x[1], reverse=True)[:top_nutrients]
 
+    # ✅ 부족이 없어도 기본 추천
+    if not deficits:
+        top_tags = all_tags[:top_nutrients]
+        suggestions = []
+        for tag in top_tags:
+            desc = nutrient_desc.get(tag, "")
+            foods = df_food[df_food["태그리스트"].apply(lambda lst: tag in lst)]["식품"].head(5).tolist()
+            suggestions.append({"부족영양소": tag, "설명": desc, "추천식품": foods})
+        return suggestions, [f["추천식품"][0] for f in suggestions if f["추천식품"]]
+
+    focus_tags = sorted(deficits.items(), key=lambda x: x[1], reverse=True)[:top_nutrients]
     suggestions, combos = [], []
     for tag, lack in focus_tags:
         desc = nutrient_desc.get(tag, "")
@@ -214,8 +206,8 @@ def recommend_next_meal(nutrient_counts: Dict[str, float],
 
 # ==================== Streamlit UI ====================
 def main():
-    st.set_page_config(page_title="슬롯별 식단 분석 · 다음 식사 제안", page_icon="🥗", layout="centered")
-    st.title("🥗 슬롯별 식단 분석 · 다음 식사 제안")
+    st.set_page_config(page_title="식단 분석 + 다음 식사 제안", page_icon="🥗", layout="centered")
+    st.title("🥗 식단 분석 · 다음 식사 제안 (v3)")
 
     init_daily_state()
     remain = next_midnight() - datetime.now(TZ)
@@ -225,7 +217,7 @@ def main():
     nutrient_desc = load_nutrient_dict_simple(NUTRIENT_DICT_CSV)
     d = st.date_input("기록 날짜", value=date.today())
 
-    # 슬롯 입력
+    # 입력 UI
     for slot in SLOTS:
         val = st.text_area(slot, height=70, placeholder=f"{slot}에 먹은 것 입력",
                            key=f"ta_{slot}", value=st.session_state.inputs.get(slot, ""))
@@ -237,8 +229,7 @@ def main():
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         st.number_input("충족 임계(수량합)", min_value=1, max_value=5,
-                        value=st.session_state.get("threshold", 1),
-                        step=1, key="threshold")
+                        value=st.session_state.get("threshold", 1), step=1, key="threshold")
     with c2:
         st.checkbox("log.csv 저장", value=st.session_state.get("export_flag", True), key="export_flag")
     with c3:
@@ -269,15 +260,12 @@ def main():
                     merged = pd.concat([prev, logs_all], ignore_index=True)
                 except Exception:
                     merged = logs_all.copy()
-                merged = merged.drop_duplicates(
-                    subset=["date","slot","입력항목","매칭식품","등급","태그","컨디션"], keep="last"
-                )
+                merged = merged.drop_duplicates(subset=["date","slot","입력항목","매칭식품","등급","태그","컨디션"], keep="last")
                 merged.to_csv(LOG_CSV, index=False, encoding="utf-8-sig")
-                st.success(f"log.csv 저장 완료 ✅")
+                st.success("log.csv 저장 완료 ✅")
             except Exception as e:
                 st.error(f"log.csv 저장 오류: {e}")
 
-        # ✅ 부족 영양소 기반 다음 식사 제안
         recs, combos = recommend_next_meal(total_counts, df_food, nutrient_desc, threshold=float(st.session_state.threshold))
         st.session_state.last_recs = recs
         st.session_state.last_combo = combos
@@ -289,14 +277,12 @@ def main():
         st.info("매칭된 항목이 없습니다.")
     else:
         cols = ["날짜","슬롯","입력항목","수량","매칭식품","등급","태그","컨디션"]
-        st.dataframe(st.session_state.last_items_df[cols],
-                     use_container_width=True,
-                     height=min(420, 36*(len(st.session_state.last_items_df)+1)))
+        st.dataframe(st.session_state.last_items_df[cols], use_container_width=True)
 
     st.markdown("### 🍽 다음 식사 제안")
     recs = st.session_state.get("last_recs", [])
     if recs is None or len(recs) == 0:
-        st.warning("부족한 영양소가 없어 추천이 없습니다. threshold를 높여보세요.")
+        st.warning("추천할 식품이 없습니다.")
     else:
         for r in recs:
             st.write(f"- **{r['부족영양소']}** ({r['설명']}) → 추천식품: {', '.join(r['추천식품'])}")
